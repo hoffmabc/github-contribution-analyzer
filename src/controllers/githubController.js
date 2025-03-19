@@ -83,13 +83,54 @@ try {
   octokit = new Octokit();
 }
 
+// Parse repositories from environment variable or use defaults
+function parseRepositories() {
+  try {
+    // Check if GITHUB_REPOS is defined in the environment
+    const reposEnv = process.env.GITHUB_REPOS;
+    
+    if (reposEnv) {
+      console.log('Using repositories from environment variable');
+      
+      // Parse the JSON array from the environment variable
+      try {
+        const repos = JSON.parse(reposEnv);
+        
+        // Validate the format of each repository
+        if (Array.isArray(repos) && repos.every(repo => repo.owner && repo.repo)) {
+          return repos;
+        } else {
+          console.error('Invalid repository format in GITHUB_REPOS environment variable');
+          console.error('Expected format: [{"owner":"owner1","repo":"repo1"},{"owner":"owner2","repo":"repo2"}]');
+          // Fall back to defaults
+        }
+      } catch (parseError) {
+        console.error('Failed to parse GITHUB_REPOS environment variable:', parseError.message);
+        // Fall back to defaults
+      }
+    }
+    
+    // Default repositories if not configured or invalid format
+    return [
+      { owner: 'arch-network', repo: 'arch-network' },
+      { owner: 'arch-network', repo: 'book' },
+      { owner: 'arch-network', repo: 'arch-infrastructure' },
+      { owner: 'arch-network', repo: 'arch-k8s' }
+    ];
+  } catch (error) {
+    console.error('Error parsing repositories:', error);
+    // Return default repositories in case of any error
+    return [
+      { owner: 'arch-network', repo: 'arch-network' },
+      { owner: 'arch-network', repo: 'book' },
+      { owner: 'arch-network', repo: 'arch-infrastructure' },
+      { owner: 'arch-network', repo: 'arch-k8s' }
+    ];
+  }
+}
+
 // List of repos to analyze
-const REPOS = [
-  { owner: 'arch-network', repo: 'arch-network' },
-  { owner: 'arch-network', repo: 'book' },
-  { owner: 'arch-network', repo: 'arch-infrastructure' },
-  { owner: 'arch-network', repo: 'arch-k8s' }
-];
+const REPOS = parseRepositories();
 
 /**
  * Handle the /review Slack command
