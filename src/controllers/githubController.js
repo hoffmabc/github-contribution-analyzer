@@ -174,11 +174,34 @@ async function handleReviewCommand({ command, respond, client }) {
  */
 async function handleGenerateReport({ args, userId, teamId, channelId, respond, client }) {
   try {
+    // Immediately acknowledge the command to prevent timeout
     await respond({
-      text: 'Generating GitHub contribution report... This might take a minute.',
+      text: 'Starting GitHub contribution report generation...\n\nThis process can take a while to complete. You will not see a "failed with operation_timeout" message, and the report will be posted to the channel when ready.',
       response_type: 'ephemeral'
     });
     
+    // Run the report generation in the background (no await)
+    generateAndPostReport(client, channelId, respond)
+      .catch(error => {
+        console.error('Error in background report generation:', error);
+      });
+    
+    // Function exits immediately after acknowledgment
+  } catch (error) {
+    console.error('Error acknowledging report generation command:', error);
+    // Try to respond but don't await (best effort)
+    respond({
+      text: 'An error occurred while starting the GitHub contribution report. Please try again.',
+      response_type: 'ephemeral'
+    }).catch(err => console.error('Failed to send error response:', err));
+  }
+}
+
+/**
+ * Helper function to generate and post report in the background
+ */
+async function generateAndPostReport(client, channelId, respond) {
+  try {
     // Generate the report
     const report = await generateContributionReport();
     
@@ -188,17 +211,26 @@ async function handleGenerateReport({ args, userId, teamId, channelId, respond, 
     // Post the report summary to the channel
     await postReportToChannel(client, channelId, report, savedReport._id);
     
-    // Send a follow-up ephemeral message
-    await respond({
-      text: 'Report has been generated and posted to the channel.',
-      response_type: 'ephemeral'
-    });
+    // Send a follow-up ephemeral message (optional, may fail if too much time has passed)
+    try {
+      await respond({
+        text: 'Report has been generated and posted to the channel.',
+        response_type: 'ephemeral'
+      });
+    } catch (respondError) {
+      console.log('Could not send follow-up message (expected if too much time passed):', respondError.message);
+    }
   } catch (error) {
-    console.error('Error generating report:', error);
-    await respond({
-      text: 'An error occurred while generating the GitHub contribution report. Please try again.',
-      response_type: 'ephemeral'
-    });
+    console.error('Error generating report in background process:', error);
+    // Try to notify about error, but it might fail if too much time has passed
+    try {
+      await client.chat.postMessage({
+        channel: channelId,
+        text: 'An error occurred while generating the GitHub contribution report. Please try again.'
+      });
+    } catch (notifyError) {
+      console.error('Failed to notify about report generation error:', notifyError);
+    }
   }
 }
 
@@ -216,28 +248,75 @@ async function handleUserReport({ args, userId, teamId, respond, client }) {
   const username = args[1];
   
   try {
+    // Immediately acknowledge the command to prevent timeout
     await respond({
-      text: `Generating GitHub contribution report for ${username}... This might take a minute.`,
+      text: `Starting GitHub contribution report generation for ${username}...\n\nThis process might take a moment. The report will be sent when complete.`,
       response_type: 'ephemeral'
     });
     
+    // Run the user report generation in the background
+    generateAndSendUserReport(username, respond, client, userId)
+      .catch(error => {
+        console.error(`Error in background user report generation for ${username}:`, error);
+      });
+    
+    // Function exits immediately after acknowledgment
+  } catch (error) {
+    console.error(`Error acknowledging user report command for ${username}:`, error);
+    // Try to respond but don't await (best effort)
+    respond({
+      text: `An error occurred while starting the GitHub contribution report for ${username}. Please try again.`,
+      response_type: 'ephemeral'
+    }).catch(err => console.error('Failed to send error response:', err));
+  }
+}
+
+/**
+ * Helper function to generate and send user report in the background
+ */
+async function generateAndSendUserReport(username, respond, client, userId) {
+  try {
     // Generate the report for a specific user
     const report = await generateUserContributionReport(username);
     
     // Format the user report
     const formattedReport = formatUserReport(report);
     
-    // Respond with the user report
-    await respond({
-      text: formattedReport,
-      response_type: 'ephemeral'
-    });
+    // Send the report as a direct message instead of ephemeral response
+    // This ensures the user gets the report even if the original response times out
+    try {
+      await client.chat.postMessage({
+        channel: userId,
+        text: `Here's your requested report for user ${username}:`,
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: formattedReport
+            }
+          }
+        ]
+      });
+    } catch (dmError) {
+      console.error(`Failed to send DM with user report for ${username}:`, dmError);
+      // Fall back to trying the original respond method
+      await respond({
+        text: formattedReport,
+        response_type: 'ephemeral'
+      });
+    }
   } catch (error) {
-    console.error(`Error generating user report for ${username}:`, error);
-    await respond({
-      text: `An error occurred while generating the GitHub contribution report for ${username}. Please try again.`,
-      response_type: 'ephemeral'
-    });
+    console.error(`Error generating user report for ${username} in background:`, error);
+    // Try to notify about error through DM
+    try {
+      await client.chat.postMessage({
+        channel: userId,
+        text: `An error occurred while generating the GitHub contribution report for ${username}. Please try again.`
+      });
+    } catch (notifyError) {
+      console.error(`Failed to notify about user report error for ${username}:`, notifyError);
+    }
   }
 }
 
@@ -246,29 +325,73 @@ async function handleUserReport({ args, userId, teamId, respond, client }) {
  */
 async function handleLastWeekReport({ args, userId, teamId, channelId, respond, client }) {
   try {
+    // Immediately acknowledge the command to prevent timeout
+    await respond({
+      text: 'Retrieving previous report... The report will be posted to the channel shortly.',
+      response_type: 'ephemeral'
+    });
+    
+    // Run the last week report retrieval in the background
+    retrieveAndPostLastReport(client, channelId, respond)
+      .catch(error => {
+        console.error('Error in background last week report retrieval:', error);
+      });
+    
+    // Function exits immediately after acknowledgment
+  } catch (error) {
+    console.error('Error acknowledging last week report command:', error);
+    // Try to respond but don't await (best effort)
+    respond({
+      text: 'An error occurred while starting to retrieve the previous report. Please try again.',
+      response_type: 'ephemeral'
+    }).catch(err => console.error('Failed to send error response:', err));
+  }
+}
+
+/**
+ * Helper function to retrieve and post last week's report in the background
+ */
+async function retrieveAndPostLastReport(client, channelId, respond) {
+  try {
     // Find the most recent report
     const lastReport = await ContributionReport.findOne().sort({ createdAt: -1 });
     
     if (!lastReport) {
-      return await respond({
-        text: 'No previous reports found. Please generate a new report.',
-        response_type: 'ephemeral'
-      });
+      // No previous reports found
+      try {
+        await client.chat.postMessage({
+          channel: channelId,
+          text: 'No previous reports found. Please generate a new report using `/review generate`.'
+        });
+      } catch (notifyError) {
+        console.error('Failed to notify about missing reports:', notifyError);
+      }
+      return;
     }
     
     // Post the report to the channel
     await postReportToChannel(client, channelId, lastReport.data, lastReport._id);
     
-    await respond({
-      text: `Previous report from ${formatTimestamp(lastReport.createdAt)} has been posted to the channel.`,
-      response_type: 'ephemeral'
-    });
+    // Try to send a follow-up message (may fail if too much time passed)
+    try {
+      await respond({
+        text: `Previous report from ${formatTimestamp(lastReport.createdAt)} has been posted to the channel.`,
+        response_type: 'ephemeral'
+      });
+    } catch (respondError) {
+      console.log('Could not send follow-up message (expected if too much time passed):', respondError.message);
+    }
   } catch (error) {
-    console.error('Error retrieving last week report:', error);
-    await respond({
-      text: 'An error occurred while retrieving the previous report. Please try again.',
-      response_type: 'ephemeral'
-    });
+    console.error('Error retrieving last week report in background:', error);
+    // Try to notify about error
+    try {
+      await client.chat.postMessage({
+        channel: channelId,
+        text: 'An error occurred while retrieving the previous report. Please try again.'
+      });
+    } catch (notifyError) {
+      console.error('Failed to notify about report retrieval error:', notifyError);
+    }
   }
 }
 
