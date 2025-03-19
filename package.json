@@ -1,0 +1,32 @@
+{
+  "name": "github-contribution-analyzer",
+  "version": "1.0.0",
+  "description": "A Slack bot that analyzes GitHub contributions across repositories",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "test": "jest"
+  },
+  "keywords": [
+    "slack",
+    "bot",
+    "github",
+    "contributions",
+    "analytics"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@octokit/rest": "^19.0.7",
+    "@slack/bolt": "^3.12.2",
+    "axios": "^1.6.2",
+    "cron": "^2.3.0",
+    "dotenv": "^16.0.3",
+    "mongoose": "^7.1.0"
+  },
+  "devDependencies": {
+    "jest": "^29.5.0",
+    "nodemon": "^2.0.22"
+  }
+}
