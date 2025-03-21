@@ -193,20 +193,27 @@ receiver.router.post('/api/analyze-contributions', async (req, res) => {
 // Setup weekly report cron job
 let weeklyReportJob;
 if (process.env.ENABLE_WEEKLY_REPORTS === 'true') {
-  weeklyReportJob = new cron.CronJob(
-    process.env.WEEKLY_REPORT_CRON || '0 9 * * 1', // Default: Mondays at 9 AM
-    async () => {
-      try {
-        await githubController.sendWeeklyReport();
-        console.log('Weekly GitHub contribution report sent successfully');
-      } catch (error) {
-        console.error('Error sending weekly GitHub report:', error);
-      }
-    },
-    null,
-    false, // Don't start automatically
-    'UTC'
-  );
+  try {
+    console.log(`Initializing weekly report job with cron: ${process.env.WEEKLY_REPORT_CRON || '0 9 * * 1'}`);
+    weeklyReportJob = new cron.CronJob(
+      '0 9 * * 1', // Default: Mondays at 9 AM - Using standard cron format to avoid 'day' alias issues
+      async () => {
+        try {
+          await githubController.sendWeeklyReport();
+          console.log('Weekly GitHub contribution report sent successfully');
+        } catch (error) {
+          console.error('Error sending weekly GitHub report:', error);
+        }
+      },
+      null,
+      false, // Don't start automatically
+      'UTC'
+    );
+    console.log('Weekly report job initialized successfully');
+  } catch (cronError) {
+    console.error('Failed to initialize weekly report job:', cronError);
+    // Continue without the weekly report job if it fails to initialize
+  }
 }
 
 // Start the app
