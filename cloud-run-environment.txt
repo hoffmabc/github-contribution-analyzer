@@ -1,0 +1,25 @@
+# Recommended environment variables for Cloud Run to optimize performance
+
+# Memory optimization flags
+MEMORY_OPTIMIZED=true
+MAX_REPOS=3
+MAX_BRANCH_PAGES=5
+
+# Skip detailed content fetching for faster reports
+SKIP_DETAILED_CONTENT=true
+
+# Skip AI analysis for faster reports (remove this if AI analysis is required)
+SKIP_AI_ANALYSIS=true
+
+# Increase cache time to reduce API calls
+CACHE_TTL=3600000
+
+# Slack configuration
+WEEKLY_REPORT_CHANNEL=your-channel-id-here
+DEFAULT_CHANNEL=your-default-channel-id-here
+ENABLE_WEEKLY_REPORTS=true
+WEEKLY_REPORT_CRON=0 9 * * 1
+
+# Note: Add these variables to your Cloud Run configuration
+# They will significantly reduce memory usage and improve performance
+# MAX_BRANCH_PAGES controls how many pages of commits to fetch per branch (5 is a good balance) 
