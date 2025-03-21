@@ -72,7 +72,33 @@ receiver.router.get('/', (req, res) => {
 
 // Add a route for health checks
 receiver.router.get('/health', (req, res) => {
-  res.status(200).send('OK');
+  // More comprehensive health check
+  try {
+    // Check critical components
+    const healthStatus = {
+      server: 'up',
+      database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+      slack_api: !!slackBotToken,
+      github_api: !!githubToken
+    };
+    
+    // Send detailed status for better debugging
+    console.log(`Health check: ${JSON.stringify(healthStatus)}`);
+    
+    // If database is not connected, still return OK but log a warning
+    if (healthStatus.database !== 'connected') {
+      console.warn('Health check: Database not connected, but service still running');
+    }
+    
+    res.status(200).json({
+      status: 'OK',
+      timestamp: new Date().toISOString(),
+      checks: healthStatus
+    });
+  } catch (error) {
+    console.error('Health check failed:', error);
+    res.status(500).send('Health check failed');
+  }
 });
 
 // Initialize the Slack app with the custom receiver
@@ -185,13 +211,34 @@ if (process.env.ENABLE_WEEKLY_REPORTS === 'true') {
 
 // Start the app
 (async () => {
-  await app.start(PORT);
-  console.log(`⚡️ GitHub Contribution Analysis Bot is running on port ${PORT}!`);
-  
-  // Start the cron job if enabled
-  if (weeklyReportJob && process.env.ENABLE_WEEKLY_REPORTS === 'true') {
-    weeklyReportJob.start();
-    console.log('Weekly GitHub report job started');
+  try {
+    console.log(`Attempting to start server on port ${PORT}...`);
+    await app.start(PORT);
+    console.log(`⚡️ GitHub Contribution Analysis Bot is running on port ${PORT}!`);
+    
+    // Ensure the app is actually listening on the correct port
+    receiver.app.on('error', (error) => {
+      console.error('Express server error:', error);
+      // Don't exit in production, try to keep running
+      if (process.env.NODE_ENV !== 'production') {
+        process.exit(1);
+      }
+    });
+    
+    // Additional check - log when the server is successfully listening
+    receiver.app.on('listening', () => {
+      console.log(`Express server confirmed listening on port ${PORT}`);
+    });
+    
+    // Start the cron job if enabled
+    if (weeklyReportJob && process.env.ENABLE_WEEKLY_REPORTS === 'true') {
+      weeklyReportJob.start();
+      console.log('Weekly GitHub report job started');
+    }
+  } catch (error) {
+    console.error('Failed to start the server:', error);
+    // Exit with an error code in all environments if server fails to start
+    process.exit(1);
   }
 })();
 
