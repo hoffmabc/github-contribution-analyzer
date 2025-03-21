@@ -2268,6 +2268,93 @@ async function getIssues(owner, repo, since, until) {
   }
 }
 
+/**
+ * Generate contribution report for a specific user across all repositories
+ */
+async function generateUserContributionReport(username) {
+  console.log(`Generating user contribution report for ${username}`);
+  
+  // Get contributions from the last 7 days
+  const endDate = new Date();
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - 7);
+  
+  // Format dates for GitHub API
+  const since = startDate.toISOString();
+  const until = endDate.toISOString();
+  
+  // Parse repositories from environment
+  const repositories = parseRepositories();
+  
+  // Process each repository to find user contributions
+  const userContributions = {
+    username: username,
+    repositories: [],
+    period: {
+      startDate: since,
+      endDate: until
+    },
+    summary: {
+      totalCommits: 0,
+      totalPRs: 0,
+      totalIssues: 0
+    }
+  };
+  
+  // Process each repository in sequence to avoid rate limits
+  for (const repo of repositories) {
+    try {
+      console.log(`Processing ${repo.owner}/${repo.name} for user ${username}`);
+      
+      // Get commits by author
+      const commits = await getCommitsByAuthor(repo.owner, repo.name, username);
+      
+      // Filter commits by date range
+      const filteredCommits = commits.filter(commit => {
+        const commitDate = new Date(commit.commit.author.date);
+        return commitDate >= startDate && commitDate <= endDate;
+      });
+      
+      // Get PRs by user
+      const prs = await getPullRequestsByUser(repo.owner, repo.name, username);
+      
+      // Filter PRs by date range
+      const filteredPRs = prs.filter(pr => {
+        const prDate = new Date(pr.created_at);
+        return prDate >= startDate && prDate <= endDate;
+      });
+      
+      // Get issues by user
+      const issues = await getIssuesByUser(repo.owner, repo.name, username);
+      
+      // Filter issues by date range
+      const filteredIssues = issues.filter(issue => {
+        const issueDate = new Date(issue.created_at);
+        return issueDate >= startDate && issueDate <= endDate;
+      });
+      
+      // Add repository to user contributions if there's activity
+      if (filteredCommits.length > 0 || filteredPRs.length > 0 || filteredIssues.length > 0) {
+        userContributions.repositories.push({
+          name: `${repo.owner}/${repo.name}`,
+          commits: filteredCommits.length,
+          pullRequests: filteredPRs.length,
+          issues: filteredIssues.length
+        });
+        
+        // Update summary counts
+        userContributions.summary.totalCommits += filteredCommits.length;
+        userContributions.summary.totalPRs += filteredPRs.length;
+        userContributions.summary.totalIssues += filteredIssues.length;
+      }
+    } catch (error) {
+      console.error(`Error processing ${repo.owner}/${repo.name} for user ${username}:`, error);
+    }
+  }
+  
+  return userContributions;
+}
+
 module.exports = {
   handleReviewCommand,
   generateContributionReport,
