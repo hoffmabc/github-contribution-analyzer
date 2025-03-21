@@ -204,6 +204,10 @@ async function showUserDetails({ data: username, report, respond }) {
   text += `• Total Commits: ${userData.totalCommits}\n`;
   text += `• Total Pull Requests: ${userData.totalPRs}\n`;
   text += `• Total Issues: ${userData.totalIssues}\n`;
+  text += `• Lines Added: ${userData.linesAdded || 0}\n`;
+  text += `• Lines Modified: ${userData.linesModified || 0}\n`;
+  text += `• Code Quality Grade: ${userData.codeQualityGrade || 'N/A'}\n`;
+  text += `• Effort Grade: ${userData.effortGrade || 'N/A'}\n`;
   text += `• Activity Score: ${userData.activityScore}\n\n`;
   
   text += `*Contributions by Repository:*\n`;
@@ -211,6 +215,32 @@ async function showUserDetails({ data: username, report, respond }) {
     if (stats.commits > 0 || stats.pullRequests > 0 || stats.issues > 0) {
       text += `• *${repo}*\n`;
       text += `  Commits: ${stats.commits} | PRs: ${stats.pullRequests} | Issues: ${stats.issues}\n`;
+      if (stats.linesAdded || stats.linesModified) {
+        text += `  Lines Added: ${stats.linesAdded || 0} | Lines Modified: ${stats.linesModified || 0}\n`;
+      }
+    }
+  }
+  
+  // Add AI analysis if available
+  if (report.aiAnalysis && report.aiAnalysis.contributors && report.aiAnalysis.contributors[username]) {
+    const analysis = report.aiAnalysis.contributors[username];
+    
+    text += `\n*AI Analysis:*\n`;
+    
+    if (analysis.assessment) {
+      text += `• *Assessment:* ${analysis.assessment}\n`;
+    }
+    
+    if (analysis.codeInsights) {
+      text += `• *Code Insights:* ${analysis.codeInsights}\n`;
+    }
+    
+    if (analysis.strengths && analysis.strengths.length > 0) {
+      text += `• *Strengths:* ${analysis.strengths.join(', ')}\n`;
+    }
+    
+    if (analysis.areasForImprovement && analysis.areasForImprovement.length > 0) {
+      text += `• *Areas for Improvement:* ${analysis.areasForImprovement.join(', ')}\n`;
     }
   }
   
@@ -236,13 +266,34 @@ async function showAllUsers({ report, respond }) {
   let text = `*All Contributors*\n`;
   text += `*Period:* ${formattedStartDate} to ${formattedEndDate}\n\n`;
   
-  rankedUsers.forEach((user, index) => {
-    text += `${index + 1}. *${user.username}* - Activity Score: ${user.activityScore}\n`;
-    text += `   Commits: ${user.totalCommits} | PRs: ${user.totalPRs} | Issues: ${user.totalIssues}\n`;
-  });
+  // Format data as a table
+  text += "```\n";
+  text += "| Developer       | Commits | Lines Added/Modified | Code Quality | Effort Grade |\n";
+  text += "|-----------------|---------|----------------------|-------------|-------------|\n";
+  
+  for (const user of rankedUsers) {
+    const username = user.username.padEnd(15).substring(0, 15);
+    const commits = (user.totalCommits || 0).toString().padEnd(7);
+    const linesChanged = `${user.linesAdded || 0}/${user.linesModified || 0}`.padEnd(20);
+    const codeQuality = (user.codeQualityGrade || 'N/A').padEnd(11);
+    const effortGrade = (user.effortGrade || 'N/A').padEnd(11);
+    
+    text += `| ${username} | ${commits} | ${linesChanged} | ${codeQuality} | ${effortGrade} |\n`;
+  }
+  
+  text += "```\n";
+  
+  // Add team summary
+  text += "*Team Summary:*\n";
+  text += `• Total Commits: ${report.summary.totalCommits}\n`;
+  text += `• Lines of Code Added: ${report.summary.totalLinesAdded || 0}\n`;
+  text += `• Pull Requests Opened: ${report.summary.totalPRs}\n`;
+  text += `• Pull Requests Merged: ${report.summary.prsMerged || 0}\n`;
+  text += `• Issues Opened: ${report.summary.totalIssues}\n`;
+  text += `• Issues Closed: ${report.summary.issuesClosed || 0}\n`;
   
   if (rankedUsers.length === 0) {
-    text += "No contributors found in this period.";
+    text = "No contributors found in this period.";
   }
   
   await respond({
