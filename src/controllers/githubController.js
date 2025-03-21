@@ -141,6 +141,20 @@ const apiCache = {
   }
 };
 
+/**
+ * Helper function to split an array into chunks of specified size
+ * Used for parallel processing with controlled concurrency
+ */
+function chunkArray(array, chunkSize) {
+  if (!array || !Array.isArray(array)) return [];
+  
+  const chunks = [];
+  for (let i = 0; i < array.length; i += chunkSize) {
+    chunks.push(array.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
 // Parse repositories from environment variable or use defaults
 function parseRepositories() {
   try {
