@@ -701,61 +701,91 @@ async function fetchCommitsForRepo(repo, since, until) {
     
     console.log(`Fetching commits for ${repo.owner}/${repo.name} from ${since.toISOString()} to ${until.toISOString()}`);
 
-    while (hasMoreCommits) {
-      let retries = 0;
-      let success = false;
+    // First, get all branches for the repository
+    let allBranches = [];
+    try {
+      console.log(`Getting all branches for ${repo.owner}/${repo.name}`);
+      const branchesResponse = await octokit.rest.repos.listBranches({
+        owner: repo.owner,
+        repo: repo.name,
+        per_page: 100
+      });
       
-      while (!success && retries < maxRetries) {
-        try {
-          console.log(`Fetching page ${page} of commits for ${repo.owner}/${repo.name}`);
-          
-          const response = await octokit.rest.repos.listCommits({
-            owner: repo.owner,
-            repo: repo.name,
-            since: since.toISOString(),
-            until: until.toISOString(),
-            per_page: 100,
-            page: page,
-          });
+      allBranches = branchesResponse.data.map(branch => branch.name);
+      console.log(`Found ${allBranches.length} branches in ${repo.owner}/${repo.name}`);
+    } catch (branchError) {
+      console.error(`Error fetching branches for ${repo.owner}/${repo.name}:`, branchError);
+      // If we can't get branches, we'll try without specifying branch (default branch only)
+      allBranches = [''];  // Empty string will use default branch
+    }
 
-          console.log(`Received ${response.data.length} commits for ${repo.owner}/${repo.name} (page ${page})`);
-          
-          if (response.data.length === 0) {
-            hasMoreCommits = false;
-          } else {
-            allCommits = [...allCommits, ...response.data];
-            page++;
-          }
-          success = true;
-        } catch (error) {
-          retries++;
-          console.log(`Error fetching commits for ${repo.owner}/${repo.name} (page ${page}, attempt ${retries}): ${error.message}`);
-          
-          if (error.status === 403 && error.response?.headers?.['x-ratelimit-remaining'] === '0') {
-            // Handle rate limiting
-            const resetTime = error.response.headers['x-ratelimit-reset'];
-            const waitTime = Math.max(resetTime * 1000 - Date.now(), 0) + 1000; // Add 1 second buffer
-            console.log(`Rate limited. Waiting for ${waitTime/1000} seconds before retrying...`);
-            await new Promise(resolve => setTimeout(resolve, waitTime));
-          } else if (retries < maxRetries) {
-            // Exponential backoff for other errors
-            const waitTime = Math.pow(2, retries) * 1000;
-            console.log(`Retrying in ${waitTime/1000} seconds...`);
-            await new Promise(resolve => setTimeout(resolve, waitTime));
-          } else {
-            console.error(`Failed to fetch commits for ${repo.owner}/${repo.name} (page ${page}) after ${maxRetries} attempts`);
-            // If we've already got some commits, continue with what we have
-            if (allCommits.length > 0) {
+    // For each branch, fetch commits
+    for (const branch of allBranches) {
+      page = 1;
+      hasMoreCommits = true;
+      
+      console.log(`Fetching commits for branch: ${branch || 'default'} in ${repo.owner}/${repo.name}`);
+      
+      while (hasMoreCommits) {
+        let retries = 0;
+        let success = false;
+        
+        while (!success && retries < maxRetries) {
+          try {
+            console.log(`Fetching page ${page} of commits for ${repo.owner}/${repo.name} branch ${branch || 'default'}`);
+            
+            const response = await octokit.rest.repos.listCommits({
+              owner: repo.owner,
+              repo: repo.name,
+              sha: branch, // Specify the branch - if empty string, uses default branch
+              since: since.toISOString(),
+              until: until.toISOString(),
+              per_page: 100,
+              page: page,
+            });
+
+            console.log(`Received ${response.data.length} commits for ${repo.owner}/${repo.name} branch ${branch || 'default'} (page ${page})`);
+            
+            if (response.data.length === 0) {
               hasMoreCommits = false;
             } else {
-              throw error; // Re-throw if we haven't got any commits
+              // Filter to avoid duplicate commits that might appear in multiple branches
+              const newCommits = response.data.filter(
+                commit => !allCommits.some(existingCommit => existingCommit.sha === commit.sha)
+              );
+              
+              console.log(`Found ${newCommits.length} new unique commits (filtered out ${response.data.length - newCommits.length} duplicates)`);
+              
+              allCommits = [...allCommits, ...newCommits];
+              page++;
+            }
+            success = true;
+          } catch (error) {
+            retries++;
+            console.log(`Error fetching commits for ${repo.owner}/${repo.name} branch ${branch || 'default'} (page ${page}, attempt ${retries}): ${error.message}`);
+            
+            if (error.status === 403 && error.response?.headers?.['x-ratelimit-remaining'] === '0') {
+              // Handle rate limiting
+              const resetTime = error.response.headers['x-ratelimit-reset'];
+              const waitTime = Math.max(resetTime * 1000 - Date.now(), 0) + 1000; // Add 1 second buffer
+              console.log(`Rate limited. Waiting for ${waitTime/1000} seconds before retrying...`);
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+            } else if (retries < maxRetries) {
+              // Exponential backoff for other errors
+              const waitTime = Math.pow(2, retries) * 1000;
+              console.log(`Retrying in ${waitTime/1000} seconds...`);
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+            } else {
+              console.error(`Failed to fetch commits for ${repo.owner}/${repo.name} branch ${branch || 'default'} (page ${page}) after ${maxRetries} attempts`);
+              // Continue to the next branch if we have issues with this one
+              hasMoreCommits = false;
             }
           }
         }
       }
     }
 
-    console.log(`Total commits fetched for ${repo.owner}/${repo.name}: ${allCommits.length}`);
+    console.log(`Total unique commits fetched for ${repo.owner}/${repo.name} across all branches: ${allCommits.length}`);
     return allCommits;
   } catch (error) {
     console.error(`Error fetching commits for ${repo.owner}/${repo.name}:`, error);
@@ -840,13 +870,19 @@ async function generateDetailedAIAnalysis(contributionData) {
           totalCommits: data.totalCommits,
           totalPRs: data.totalPRs,
           totalIssues: data.totalIssues,
+          linesAdded: data.linesAdded,
+          linesDeleted: data.linesDeleted,
+          linesModified: data.linesModified,
           repositories: Object.entries(data.repositories)
             .filter(([_, stats]) => stats.commits > 0 || stats.pullRequests > 0 || stats.issues > 0)
             .map(([repo, stats]) => ({
               repo,
               commits: stats.commits,
               pullRequests: stats.pullRequests,
-              issues: stats.issues
+              issues: stats.issues,
+              linesAdded: stats.linesAdded,
+              linesDeleted: stats.linesDeleted,
+              linesModified: stats.linesModified
             }))
         };
         
@@ -967,6 +1003,8 @@ As a GitHub contribution analyst with software engineering expertise, please rev
      * Test coverage and robustness
    - Technical strengths and areas for improvement
    - Specific insights based on their code, PR, and issue content
+   - A letter grade for code quality (A+, A, A-, B+, B, etc.)
+   - A letter grade for effort shown over the past week
 
 Contribution data for the past week:
 ${JSON.stringify(contributors, null, 2)}
@@ -977,6 +1015,8 @@ IMPORTANT:
 - Look for patterns in PR reviews and comments
 - Consider issue descriptions and level of detail
 - Keep each contributor's analysis concise (3-5 sentences maximum)
+- For effort grade, consider: lines of code added/modified, number and complexity of PRs, and overall activity
+- For code quality grade, consider: code organization, complexity management, and readability
 
 Respond in this JSON format:
 {
@@ -987,17 +1027,33 @@ Respond in this JSON format:
       "codeInsights": "Specific observations about their code style, quality, and patterns",
       "strengths": ["Technical strength 1", "Technical strength 2"],
       "areasForImprovement": ["Technical area 1", "Technical area 2"],
-      "codeQualityScore": 8.5
+      "codeQualityScore": 8.5,
+      "codeQualityGrade": "B+",
+      "effortGrade": "A-"
     },
     ...
   }
 }
 
 For codeQualityScore, use a scale of 1-10 where:
-1-3: Needs significant improvement
-4-6: Average quality code
-7-8: Good quality code with minor issues 
-9-10: Excellent, well-structured, maintainable code`;
+1-3: Needs significant improvement (D or F grade)
+4-6: Average quality code (C grade)
+7-8: Good quality code with minor issues (B grade)
+9-10: Excellent, well-structured, maintainable code (A grade)
+
+For letter grades:
+A+: Exceptional
+A: Excellent
+A-: Very good
+B+: Good with some notable strengths
+B: Solid, good
+B-: Slightly above average
+C+: Average with some positive aspects
+C: Average
+C-: Below average but acceptable
+D+: Barely acceptable
+D: Poor
+F: Failing/Unacceptable`;
 
     try {
       // Call Claude API
@@ -1065,6 +1121,11 @@ async function generateContributionReport() {
       totalCommits: 0,
       totalPRs: 0,
       totalIssues: 0,
+      totalLinesAdded: 0,
+      totalLinesDeleted: 0,
+      totalLinesModified: 0,
+      prsMerged: 0,
+      issuesClosed: 0,
       repositories: REPOS.map(r => `${r.owner}/${r.repo}`),
       period: {
         startDate: since,
@@ -1082,10 +1143,15 @@ async function generateContributionReport() {
       commits: 0,
       pullRequests: 0,
       issues: 0,
+      prsMerged: 0,
+      issuesClosed: 0,
+      linesAdded: 0,
+      linesDeleted: 0,
+      linesModified: 0,
       contributors: []
     };
     
-    // Get commit activity
+    // Get commit activity from ALL branches (don't filter by branch)
     const commits = await fetchCommitsForRepo({ owner, name: repo }, new Date(since), new Date(until));
     contributions.summary.totalCommits += commits.length;
     contributions.repositories[repoKey].commits = commits.length;
@@ -1104,12 +1170,56 @@ async function generateContributionReport() {
       if (!contributions.repositories[repoKey].contributors.includes(author)) {
         contributions.repositories[repoKey].contributors.push(author);
       }
+      
+      // Get detailed commit info to calculate lines of code changes
+      try {
+        const commitData = await octokit.repos.getCommit({
+          owner,
+          repo,
+          ref: commit.sha
+        });
+        
+        // Extract stats for lines added/deleted
+        const files = commitData.data.files || [];
+        let commitLinesAdded = 0;
+        let commitLinesDeleted = 0;
+        
+        for (const file of files) {
+          commitLinesAdded += file.additions || 0;
+          commitLinesDeleted += file.deletions || 0;
+        }
+        
+        // Update user stats
+        contributions.users[author].linesAdded += commitLinesAdded;
+        contributions.users[author].linesDeleted += commitLinesDeleted;
+        contributions.users[author].linesModified += (commitLinesAdded + commitLinesDeleted);
+        
+        // Update repo user stats
+        contributions.users[author].repositories[repoKey].linesAdded += commitLinesAdded;
+        contributions.users[author].repositories[repoKey].linesDeleted += commitLinesDeleted;
+        contributions.users[author].repositories[repoKey].linesModified += (commitLinesAdded + commitLinesDeleted);
+        
+        // Update repo and summary total stats
+        contributions.repositories[repoKey].linesAdded += commitLinesAdded;
+        contributions.repositories[repoKey].linesDeleted += commitLinesDeleted;
+        contributions.repositories[repoKey].linesModified += (commitLinesAdded + commitLinesDeleted);
+        contributions.summary.totalLinesAdded += commitLinesAdded;
+        contributions.summary.totalLinesDeleted += commitLinesDeleted;
+        contributions.summary.totalLinesModified += (commitLinesAdded + commitLinesDeleted);
+      } catch (error) {
+        console.error(`Error fetching commit details for ${commit.sha}:`, error.message);
+      }
     }
     
     // Get pull requests
     const prs = await getPullRequests(owner, repo, since, until);
     contributions.summary.totalPRs += prs.length;
     contributions.repositories[repoKey].pullRequests = prs.length;
+    
+    // Count merged PRs
+    const mergedPRs = prs.filter(pr => pr.merged_at !== null);
+    contributions.summary.prsMerged += mergedPRs.length;
+    contributions.repositories[repoKey].prsMerged = mergedPRs.length;
     
     // Process PRs by user
     for (const pr of prs) {
@@ -1131,6 +1241,11 @@ async function generateContributionReport() {
     const issues = await getIssues(owner, repo, since, until);
     contributions.summary.totalIssues += issues.length;
     contributions.repositories[repoKey].issues = issues.length;
+    
+    // Count closed issues
+    const closedIssues = issues.filter(issue => issue.state === 'closed' && !issue.pull_request);
+    contributions.summary.issuesClosed += closedIssues.length;
+    contributions.repositories[repoKey].issuesClosed = closedIssues.length;
     
     // Process issues by user
     for (const issue of issues) {
@@ -1155,17 +1270,31 @@ async function generateContributionReport() {
     await fetchDetailedContent(owner, repo, contributions);
   }
   
-  // Calculate activity scores for ranking
+  // Calculate activity scores and assign grades
   for (const username in contributions.users) {
     const user = contributions.users[username];
+    
     // Simple weighted score: commits are worth 3, PRs are worth 5, issues are worth 1
     user.activityScore = (user.totalCommits * 3) + (user.totalPRs * 5) + (user.totalIssues * 1);
+    
+    // Assign effort grade based on lines modified and activity score
+    user.effortGrade = calculateEffortGrade(user.linesModified, user.activityScore);
   }
   
   // Generate detailed AI analysis if possible (with code content)
   const aiAnalysis = await generateDetailedAIAnalysis(contributions);
   if (aiAnalysis) {
     contributions.aiAnalysis = aiAnalysis;
+    
+    // Add code quality grades from AI analysis
+    if (aiAnalysis.contributors) {
+      for (const username in aiAnalysis.contributors) {
+        if (contributions.users[username] && aiAnalysis.contributors[username].codeQualityScore) {
+          const codeQualityScore = aiAnalysis.contributors[username].codeQualityScore;
+          contributions.users[username].codeQualityGrade = convertScoreToGrade(codeQualityScore);
+        }
+      }
+    }
   } else {
     // Fall back to basic analysis if detailed analysis fails
     const basicAnalysis = await generateAIAnalysis(contributions);
@@ -1175,6 +1304,41 @@ async function generateContributionReport() {
   }
   
   return contributions;
+}
+
+// Helper function to convert numeric score to letter grade
+function convertScoreToGrade(score) {
+  if (score >= 9.0) return 'A+';
+  if (score >= 8.5) return 'A';
+  if (score >= 8.0) return 'A-';
+  if (score >= 7.5) return 'B+';
+  if (score >= 7.0) return 'B';
+  if (score >= 6.5) return 'B-';
+  if (score >= 6.0) return 'C+';
+  if (score >= 5.5) return 'C';
+  if (score >= 5.0) return 'C-';
+  if (score >= 4.0) return 'D+';
+  if (score >= 3.0) return 'D';
+  return 'F';
+}
+
+// Helper function to calculate effort grade based on lines modified and activity score
+function calculateEffortGrade(linesModified, activityScore) {
+  // This is a simple algorithm - you might want to tune these thresholds
+  const score = (linesModified * 0.7) + (activityScore * 0.3);
+  
+  if (score >= 1000) return 'A+';
+  if (score >= 800) return 'A';
+  if (score >= 600) return 'A-';
+  if (score >= 500) return 'B+';
+  if (score >= 400) return 'B';
+  if (score >= 300) return 'B-';
+  if (score >= 200) return 'C+';
+  if (score >= 150) return 'C';
+  if (score >= 100) return 'C-';
+  if (score >= 50) return 'D+';
+  if (score >= 25) return 'D';
+  return 'F';
 }
 
 /**
@@ -1203,6 +1367,11 @@ function initializeUserStats(usersObj, username) {
     totalCommits: 0,
     totalPRs: 0,
     totalIssues: 0,
+    linesAdded: 0,
+    linesDeleted: 0,
+    linesModified: 0,
+    codeQualityGrade: 'N/A',
+    effortGrade: 'N/A',
     activityScore: 0,
     repositories: {}
   };
@@ -1213,7 +1382,10 @@ function initializeUserStats(usersObj, username) {
     usersObj[username].repositories[repoKey] = {
       commits: 0,
       pullRequests: 0,
-      issues: 0
+      issues: 0,
+      linesAdded: 0,
+      linesDeleted: 0,
+      linesModified: 0
     };
   }
 }
@@ -1239,118 +1411,302 @@ async function postReportToChannel(client, channelId, report, reportId) {
   const formattedStartDate = new Date(startDate).toLocaleDateString();
   const formattedEndDate = new Date(endDate).toLocaleDateString();
   
-  // Rank users by activity score
-  const rankedUsers = Object.entries(report.users)
-    .map(([username, data]) => ({ username, ...data }))
-    .sort((a, b) => b.activityScore - a.activityScore);
-  
-  // Format the message
+  // Create a fallback text message
   let text = `*GitHub Contribution Report*\n`;
   text += `*Period:* ${formattedStartDate} to ${formattedEndDate}\n\n`;
-  text += `*Summary:*\n`;
-  text += `• Total Commits: ${report.summary.totalCommits}\n`;
-  text += `• Total Pull Requests: ${report.summary.totalPRs}\n`;
-  text += `• Total Issues: ${report.summary.totalIssues}\n`;
-  text += `• Repositories Analyzed: ${report.summary.repositories.length}\n\n`;
   
-  // Add AI summary if available
-  if (report.aiAnalysis && report.aiAnalysis.summary) {
-    text += `*AI Analysis:*\n${report.aiAnalysis.summary}\n\n`;
-  }
-  
-  text += `*Top Contributors This Week:*\n`;
-  
-  // Add top 5 users
-  const topUsers = rankedUsers.slice(0, 5);
-  topUsers.forEach((user, index) => {
-    text += `${index + 1}. *${user.username}* - Activity Score: ${user.activityScore}\n`;
-    text += `   Commits: ${user.totalCommits} | PRs: ${user.totalPRs} | Issues: ${user.totalIssues}\n`;
-    
-    // Add AI analysis for this user if available
-    if (report.aiAnalysis && report.aiAnalysis.contributors && report.aiAnalysis.contributors[user.username]) {
-      const userAnalysis = report.aiAnalysis.contributors[user.username];
-      
-      if (userAnalysis.assessment) {
-        text += `   *Assessment:* ${userAnalysis.assessment}\n`;
+  // Create rich message blocks for the report
+  const blocks = [
+    {
+      type: "header",
+      text: {
+        type: "plain_text",
+        text: "GitHub Contribution Report",
+        emoji: true
       }
-      
-      // Add code insights if available
-      if (userAnalysis.codeInsights) {
-        text += `   *Code Insights:* ${userAnalysis.codeInsights}\n`;
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*Period:* ${formattedStartDate} to ${formattedEndDate}`
       }
-      
-      // Add code quality score if available
-      if (userAnalysis.codeQualityScore) {
-        text += `   *Code Quality Score:* ${userAnalysis.codeQualityScore}/10\n`;
-      }
-      
-      if (userAnalysis.strengths && userAnalysis.strengths.length > 0) {
-        text += `   *Strengths:* ${userAnalysis.strengths.join(', ')}\n`;
-      }
-      
-      if (userAnalysis.areasForImprovement && userAnalysis.areasForImprovement.length > 0) {
-        text += `   *Areas for Improvement:* ${userAnalysis.areasForImprovement.join(', ')}\n`;
+    },
+    {
+      type: "divider"
+    },
+    {
+      type: "header",
+      text: {
+        type: "plain_text",
+        text: "Team Stats",
+        emoji: true
       }
     }
-    
-    text += `\n`;
+  ];
+  
+  // Add team stats table
+  const teamStatsTable = formatTeamStatsTable(report.summary);
+  blocks.push({
+    type: "section",
+    text: {
+      type: "mrkdwn",
+      text: teamStatsTable
+    }
   });
   
-  // First try with simple text only, no blocks
+  // Add individual developer stats
+  blocks.push({
+    type: "divider"
+  });
+  
+  blocks.push({
+    type: "header",
+    text: {
+      type: "plain_text",
+      text: "Individual Developer Stats",
+      emoji: true
+    }
+  });
+  
+  // Format individual stats table
+  const individualStatsTable = formatIndividualStatsTable(report.users);
+  blocks.push({
+    type: "section",
+    text: {
+      type: "mrkdwn",
+      text: individualStatsTable
+    }
+  });
+  
+  // Add button to see detailed report
+  blocks.push({
+    type: "actions",
+    elements: [
+      {
+        type: "button",
+        text: {
+          type: "plain_text",
+          text: "View Detailed Report",
+          emoji: true
+        },
+        value: `all_${reportId}`,
+        action_id: "view_details"
+      }
+    ]
+  });
+  
+  // Add AI analysis summary if available
+  if (report.aiAnalysis && report.aiAnalysis.summary) {
+    blocks.push({
+      type: "divider"
+    });
+    
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: "*AI Analysis Summary:*\n" + report.aiAnalysis.summary
+      }
+    });
+  }
+  
+  // Post the message to the channel
   try {
-    await client.chat.postMessage({
+    const result = await client.chat.postMessage({
+      channel: channelId,
+      text: text,
+      blocks: blocks
+    });
+    
+    console.log('Report posted to channel successfully');
+    return result;
+  } catch (error) {
+    console.error('Error posting report to channel:', error);
+    // Try a simpler message as fallback
+    return await client.chat.postMessage({
       channel: channelId,
       text: text
     });
+  }
+}
+
+/**
+ * Format team stats as a Slack-compatible markdown table
+ */
+function formatTeamStatsTable(summary) {
+  let table = "```\n";
+  table += "| Metric                | Value            |\n";
+  table += "|----------------------|------------------|\n";
+  table += `| Total Commits         | ${summary.totalCommits.toString().padEnd(16)} |\n`;
+  table += `| Lines of Code Added   | ${summary.totalLinesAdded.toString().padEnd(16)} |\n`;
+  table += `| PRs Opened            | ${summary.totalPRs.toString().padEnd(16)} |\n`;
+  table += `| PRs Merged            | ${summary.prsMerged.toString().padEnd(16)} |\n`;
+  table += `| Issues Opened         | ${summary.totalIssues.toString().padEnd(16)} |\n`;
+  table += `| Issues Closed         | ${summary.issuesClosed.toString().padEnd(16)} |\n`;
+  table += "```";
+  
+  return table;
+}
+
+/**
+ * Format individual developer stats as a Slack-compatible markdown table
+ */
+function formatIndividualStatsTable(users) {
+  // Rank users by activity score
+  const rankedUsers = Object.entries(users)
+    .map(([username, data]) => ({ username, ...data }))
+    .sort((a, b) => b.activityScore - a.activityScore);
+  
+  let table = "```\n";
+  table += "| Developer       | Commits | Lines Added/Modified | Code Quality | Effort Grade |\n";
+  table += "|-----------------|---------|----------------------|-------------|-------------|\n";
+  
+  for (const user of rankedUsers) {
+    const username = user.username.padEnd(15).substring(0, 15);
+    const commits = user.totalCommits.toString().padEnd(7);
+    const linesChanged = `${user.linesAdded}/${user.linesModified}`.padEnd(20);
+    const codeQuality = user.codeQualityGrade.padEnd(11);
+    const effortGrade = user.effortGrade.padEnd(11);
     
-    console.log('Successfully posted report to channel without blocks');
-    return;
-  } catch (error) {
-    console.log('Error posting message without blocks, falling back to simpler format:', error.message);
+    table += `| ${username} | ${commits} | ${linesChanged} | ${codeQuality} | ${effortGrade} |\n`;
+  }
+  
+  table += "```";
+  
+  return table;
+}
+
+/**
+ * Show help message
+ */
+async function showHelp(respond) {
+  const helpText = `
+*GitHub Contribution Analysis Bot Help*
+
+*/review generate*
+Generate a contribution report for all users in all repositories. 
+Shows team stats (commits, lines of code, PRs opened/merged, issues opened/closed) and individual developer stats (commits, lines modified, code quality and effort grades).
+
+*/review user [username]*
+View the detailed contribution details for a specific GitHub user
+
+*/review lastweek*
+Show the most recent contribution report
+
+*/review token*
+Check GitHub token information (for troubleshooting)
+
+*/review help*
+Show this help message
+  `;
+  
+  await respond({
+    text: helpText,
+    response_type: 'ephemeral'
+  });
+}
+
+/**
+ * Show GitHub token information for debugging
+ */
+async function handleTokenInfo({ respond }) {
+  try {
+    // Don't include the actual token in the response for security
+    let tokenInfo = "GitHub Token Information:\n";
     
-    // If that fails, try with minimal blocks
-    try {
-      const simpleBlocks = [
-        {
-          "type": "section",
-          "text": {
-            "type": "mrkdwn",
-            "text": "*GitHub Contribution Report*"
-          }
-        },
-        {
-          "type": "section",
-          "text": {
-            "type": "mrkdwn",
-            "text": `*Period:* ${formattedStartDate} to ${formattedEndDate}`
-          }
-        },
-        {
-          "type": "section",
-          "text": {
-            "type": "mrkdwn",
-            "text": `*Summary:*\n• Total Commits: ${report.summary.totalCommits}\n• Total Pull Requests: ${report.summary.totalPRs}\n• Total Issues: ${report.summary.totalIssues}`
-          }
-        }
-      ];
+    if (githubToken) {
+      tokenInfo += `• Token exists: Yes\n`;
+      tokenInfo += `• Token length: ${githubToken.length}\n`;
       
-      // Keep it simple
-      await client.chat.postMessage({
-        channel: channelId,
-        text: "GitHub Contribution Report",
-        blocks: simpleBlocks
-      });
+      // Check if token has valid characters
+      const validChars = /^[a-zA-Z0-9_\-]+$/;
+      const isValidFormat = validChars.test(githubToken);
+      tokenInfo += `• Token format valid: ${isValidFormat ? 'Yes' : 'No'}\n`;
       
-      console.log('Successfully posted simplified report to channel');
-    } catch (blockError) {
-      console.error('Error posting even with simplified blocks:', blockError);
-      
-      // Last resort: just text with no formatting
-      await client.chat.postMessage({
-        channel: channelId,
-        text: `GitHub Contribution Report for ${formattedStartDate} to ${formattedEndDate}: ${report.summary.totalCommits} commits, ${report.summary.totalPRs} PRs, ${report.summary.totalIssues} issues.`
-      });
+      // Test the token with a simple API call
+      try {
+        const response = await octokit.users.getAuthenticated();
+        tokenInfo += `• Authentication test: Success\n`;
+        tokenInfo += `• Authenticated as: ${response.data.login}\n`;
+        
+        // Add rate limit info
+        const rateLimit = await octokit.rateLimit.get();
+        tokenInfo += `• Rate limit: ${rateLimit.data.rate.remaining}/${rateLimit.data.rate.limit}\n`;
+        tokenInfo += `• Rate limit resets: ${new Date(rateLimit.data.rate.reset * 1000).toLocaleString()}\n`;
+      } catch (error) {
+        tokenInfo += `• Authentication test: Failed\n`;
+        tokenInfo += `• Error: ${error.message}\n`;
+      }
+    } else {
+      tokenInfo += `• Token exists: No\n`;
+      tokenInfo += `• Status: Using unauthenticated client with reduced rate limits\n`;
     }
+    
+    await respond({
+      text: tokenInfo,
+      response_type: 'ephemeral'
+    });
+  } catch (error) {
+    console.error('Error checking token info:', error);
+    await respond({
+      text: `Error checking GitHub token: ${error.message}`,
+      response_type: 'ephemeral'
+    });
+  }
+}
+
+// Update PR search to use the non-deprecated API
+async function fetchPullRequestsForUser(repo, username, since) {
+  try {
+    console.log(`Fetching PRs for ${username} in ${repo.owner}/${repo.name}`);
+    
+    // Use the pulls API instead of search
+    const pullRequests = await octokit.paginate(octokit.rest.pulls.list, {
+      owner: repo.owner,
+      repo: repo.name,
+      state: 'all',
+      per_page: 100
+    });
+    
+    // Filter by author and date
+    const sinceDate = new Date(since);
+    const filteredPRs = pullRequests.filter(pr => {
+      const prCreatedAt = new Date(pr.created_at);
+      return pr.user.login.toLowerCase() === username.toLowerCase() && prCreatedAt >= sinceDate;
+    });
+    
+    console.log(`Found ${filteredPRs.length} PRs for ${username} in ${repo.owner}/${repo.name}`);
+    return filteredPRs;
+  } catch (error) {
+    console.error(`Error fetching PRs for ${username} in ${repo.owner}/${repo.name}:`, error);
+    return [];
+  }
+}
+
+// Update issue search to use the non-deprecated API
+async function fetchIssuesForUser(repo, username, since) {
+  try {
+    console.log(`Fetching issues for ${username} in ${repo.owner}/${repo.name}`);
+    
+    // Use the issues API instead of search
+    const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
+      owner: repo.owner,
+      repo: repo.name,
+      state: 'all',
+      creator: username,
+      since: since.toISOString(),
+      per_page: 100
+    });
+    
+    // Filter out pull requests (they're also returned by the issues API)
+    const filteredIssues = issues.filter(issue => !issue.pull_request);
+    
+    console.log(`Found ${filteredIssues.length} issues for ${username} in ${repo.owner}/${repo.name}`);
+    return filteredIssues;
+  } catch (error) {
+    console.error(`Error fetching issues for ${username} in ${repo.owner}/${repo.name}:`, error);
+    return [];
   }
 }
 
@@ -1370,13 +1726,17 @@ function formatUserReport(userReport) {
   text += `• Total Commits: ${data.totalCommits}\n`;
   text += `• Total Pull Requests: ${data.totalPRs}\n`;
   text += `• Total Issues: ${data.totalIssues}\n`;
+  text += `• Lines Added: ${data.linesAdded}\n`;
+  text += `• Lines Modified: ${data.linesModified}\n`;
+  text += `• Code Quality Grade: ${data.codeQualityGrade}\n`;
+  text += `• Effort Grade: ${data.effortGrade}\n`;
   text += `• Activity Score: ${data.activityScore}\n\n`;
   
   text += `*Contributions by Repository:*\n`;
   for (const [repo, stats] of Object.entries(data.repositories)) {
     if (stats.commits > 0 || stats.pullRequests > 0 || stats.issues > 0) {
       text += `• *${repo}*\n`;
-      text += `  Commits: ${stats.commits} | PRs: ${stats.pullRequests} | Issues: ${stats.issues}\n`;
+      text += `  Commits: ${stats.commits} | PRs: ${stats.pullRequests} | Issues: ${stats.issues} | Lines: ${stats.linesAdded}/${stats.linesModified}\n`;
     }
   }
   
@@ -1620,138 +1980,6 @@ async function getIssues(owner, repo, since, until) {
     return allIssues;
   } catch (error) {
     console.error(`[ERROR] Error in getIssues for ${owner}/${repo}:`, error);
-    return [];
-  }
-}
-
-/**
- * Show help message
- */
-async function showHelp(respond) {
-  const helpText = `
-*GitHub Contribution Analysis Bot Help*
-
-*/review generate*
-Generate a contribution report for all users in all repositories
-
-*/review user [username]*
-View the contribution details for a specific GitHub user
-
-*/review lastweek*
-Show the most recent contribution report
-
-*/review token*
-Check GitHub token information (for troubleshooting)
-
-*/review help*
-Show this help message
-  `;
-  
-  await respond({
-    text: helpText,
-    response_type: 'ephemeral'
-  });
-}
-
-/**
- * Show GitHub token information for debugging
- */
-async function handleTokenInfo({ respond }) {
-  try {
-    // Don't include the actual token in the response for security
-    let tokenInfo = "GitHub Token Information:\n";
-    
-    if (githubToken) {
-      tokenInfo += `• Token exists: Yes\n`;
-      tokenInfo += `• Token length: ${githubToken.length}\n`;
-      
-      // Check if token has valid characters
-      const validChars = /^[a-zA-Z0-9_\-]+$/;
-      const isValidFormat = validChars.test(githubToken);
-      tokenInfo += `• Token format valid: ${isValidFormat ? 'Yes' : 'No'}\n`;
-      
-      // Test the token with a simple API call
-      try {
-        const response = await octokit.users.getAuthenticated();
-        tokenInfo += `• Authentication test: Success\n`;
-        tokenInfo += `• Authenticated as: ${response.data.login}\n`;
-        
-        // Add rate limit info
-        const rateLimit = await octokit.rateLimit.get();
-        tokenInfo += `• Rate limit: ${rateLimit.data.rate.remaining}/${rateLimit.data.rate.limit}\n`;
-        tokenInfo += `• Rate limit resets: ${new Date(rateLimit.data.rate.reset * 1000).toLocaleString()}\n`;
-      } catch (error) {
-        tokenInfo += `• Authentication test: Failed\n`;
-        tokenInfo += `• Error: ${error.message}\n`;
-      }
-    } else {
-      tokenInfo += `• Token exists: No\n`;
-      tokenInfo += `• Status: Using unauthenticated client with reduced rate limits\n`;
-    }
-    
-    await respond({
-      text: tokenInfo,
-      response_type: 'ephemeral'
-    });
-  } catch (error) {
-    console.error('Error checking token info:', error);
-    await respond({
-      text: `Error checking GitHub token: ${error.message}`,
-      response_type: 'ephemeral'
-    });
-  }
-}
-
-// Update PR search to use the non-deprecated API
-async function fetchPullRequestsForUser(repo, username, since) {
-  try {
-    console.log(`Fetching PRs for ${username} in ${repo.owner}/${repo.name}`);
-    
-    // Use the pulls API instead of search
-    const pullRequests = await octokit.paginate(octokit.rest.pulls.list, {
-      owner: repo.owner,
-      repo: repo.name,
-      state: 'all',
-      per_page: 100
-    });
-    
-    // Filter by author and date
-    const sinceDate = new Date(since);
-    const filteredPRs = pullRequests.filter(pr => {
-      const prCreatedAt = new Date(pr.created_at);
-      return pr.user.login.toLowerCase() === username.toLowerCase() && prCreatedAt >= sinceDate;
-    });
-    
-    console.log(`Found ${filteredPRs.length} PRs for ${username} in ${repo.owner}/${repo.name}`);
-    return filteredPRs;
-  } catch (error) {
-    console.error(`Error fetching PRs for ${username} in ${repo.owner}/${repo.name}:`, error);
-    return [];
-  }
-}
-
-// Update issue search to use the non-deprecated API
-async function fetchIssuesForUser(repo, username, since) {
-  try {
-    console.log(`Fetching issues for ${username} in ${repo.owner}/${repo.name}`);
-    
-    // Use the issues API instead of search
-    const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
-      owner: repo.owner,
-      repo: repo.name,
-      state: 'all',
-      creator: username,
-      since: since.toISOString(),
-      per_page: 100
-    });
-    
-    // Filter out pull requests (they're also returned by the issues API)
-    const filteredIssues = issues.filter(issue => !issue.pull_request);
-    
-    console.log(`Found ${filteredIssues.length} issues for ${username} in ${repo.owner}/${repo.name}`);
-    return filteredIssues;
-  } catch (error) {
-    console.error(`Error fetching issues for ${username} in ${repo.owner}/${repo.name}:`, error);
     return [];
   }
 }
