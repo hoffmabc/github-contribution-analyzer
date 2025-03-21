@@ -20,6 +20,9 @@ ENV NODE_ENV=production
 # Make sure the app listens on the port provided by Cloud Run
 ENV PORT=8080
 
+# Explicitly expose port 8080
+EXPOSE 8080
+
 # Create a non-root user and switch to it
 RUN groupadd -r nodejs && useradd -r -g nodejs nodejs
 RUN chown -R nodejs:nodejs /app
