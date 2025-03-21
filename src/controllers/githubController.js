@@ -147,12 +147,45 @@ const apiCache = {
  */
 function chunkArray(array, chunkSize) {
   if (!array || !Array.isArray(array)) return [];
-  
   const chunks = [];
   for (let i = 0; i < array.length; i += chunkSize) {
     chunks.push(array.slice(i, i + chunkSize));
   }
   return chunks;
+}
+
+/**
+ * Initialize user stats in the contributions object
+ */
+function initializeUserStats(usersObj, username) {
+  if (!usersObj[username]) {
+    usersObj[username] = {
+      totalCommits: 0,
+      totalPRs: 0,
+      totalIssues: 0,
+      linesAdded: 0,
+      linesDeleted: 0,
+      linesModified: 0,
+      activityScore: 0,
+      codeQualityGrade: 'N/A',
+      effortGrade: 'N/A',
+      repositories: {}
+    };
+  }
+  
+  // Ensure all repositories have stats initialized for this user
+  // This function is called when processing per-repo stats
+  const repoKey = arguments[2]; // Optional third parameter
+  if (repoKey && !usersObj[username].repositories[repoKey]) {
+    usersObj[username].repositories[repoKey] = {
+      commits: 0,
+      pullRequests: 0,
+      issues: 0,
+      linesAdded: 0,
+      linesDeleted: 0,
+      linesModified: 0
+    };
+  }
 }
 
 // Parse repositories from environment variable or use defaults
@@ -1586,6 +1619,11 @@ async function generateContributionReport() {
                 initializeUserStats(contributions.users, author);
               }
               
+              // Initialize repository for this user if not already done
+              if (!contributions.users[author].repositories[repoKey]) {
+                initializeUserStats(contributions.users, author, repoKey);
+              }
+              
               // Update commit counts
               contributions.users[author].totalCommits += authorCommits.length;
               contributions.users[author].repositories[repoKey].commits += authorCommits.length;
@@ -1697,6 +1735,11 @@ async function generateContributionReport() {
                 initializeUserStats(contributions.users, author);
               }
               
+              // Initialize repository for this user if not already done
+              if (!contributions.users[author].repositories[repoKey]) {
+                initializeUserStats(contributions.users, author, repoKey);
+              }
+              
               contributions.users[author].totalPRs += authorPRs.length;
               contributions.users[author].repositories[repoKey].pullRequests += authorPRs.length;
               
@@ -1745,6 +1788,11 @@ async function generateContributionReport() {
             await Promise.all(Array.from(issuesByAuthor.entries()).map(async ([author, authorIssues]) => {
               if (!contributions.users[author]) {
                 initializeUserStats(contributions.users, author);
+              }
+              
+              // Initialize repository for this user if not already done
+              if (!contributions.users[author].repositories[repoKey]) {
+                initializeUserStats(contributions.users, author, repoKey);
               }
               
               contributions.users[author].totalIssues += authorIssues.length;
@@ -2367,6 +2415,46 @@ async function generateUserContributionReport(username) {
   }
   
   return userContributions;
+}
+
+/**
+ * Calculate effort grade based on lines modified and activity score
+ * @param {number} linesModified - Total lines modified
+ * @param {number} activityScore - Activity score
+ * @returns {string} Letter grade
+ */
+function calculateEffortGrade(linesModified, activityScore) {
+  // Calculate effort grade based on lines modified and activity score
+  if (linesModified > 1000 || activityScore > 50) return 'A+';
+  if (linesModified > 750 || activityScore > 40) return 'A';
+  if (linesModified > 500 || activityScore > 30) return 'A-';
+  if (linesModified > 300 || activityScore > 20) return 'B+';
+  if (linesModified > 200 || activityScore > 15) return 'B';
+  if (linesModified > 100 || activityScore > 10) return 'B-';
+  if (linesModified > 50 || activityScore > 5) return 'C+';
+  if (linesModified > 25 || activityScore > 3) return 'C';
+  if (linesModified > 10 || activityScore > 1) return 'C-';
+  return 'D';
+}
+
+/**
+ * Convert numeric score to letter grade
+ * @param {number} score - Score from 1-10
+ * @returns {string} Letter grade
+ */
+function convertScoreToGrade(score) {
+  if (score >= 9.5) return 'A+';
+  if (score >= 9.0) return 'A';
+  if (score >= 8.5) return 'A-';
+  if (score >= 8.0) return 'B+';
+  if (score >= 7.5) return 'B';
+  if (score >= 7.0) return 'B-';
+  if (score >= 6.5) return 'C+';
+  if (score >= 6.0) return 'C';
+  if (score >= 5.5) return 'C-';
+  if (score >= 5.0) return 'D+';
+  if (score >= 4.0) return 'D';
+  return 'F';
 }
 
 module.exports = {
