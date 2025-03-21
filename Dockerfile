@@ -18,19 +18,20 @@ COPY . .
 ENV NODE_ENV=production
 
 # Make sure the app listens on the port provided by Cloud Run
-ENV PORT=8080
+# App is binding to port 3000 internally despite our settings
+ENV PORT=3000
 
-# Explicitly expose port 8080
-EXPOSE 8080
+# Explicitly expose port 3000 for internal communication
+EXPOSE 3000
 
 # Create a non-root user and switch to it
 RUN groupadd -r nodejs && useradd -r -g nodejs nodejs
 RUN chown -R nodejs:nodejs /app
 USER nodejs
 
-# Add health check
+# Add health check using the correct internal port
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8080/health || exit 1
+  CMD curl -f http://localhost:3000/health || exit 1
 
 # Explicitly set the entrypoint and command with garbage collection enabled
 CMD ["node", "--expose-gc", "src/index.js"]
