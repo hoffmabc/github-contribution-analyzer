@@ -523,165 +523,227 @@ Respond in this JSON format:
 async function fetchDetailedContent(owner, repo, contributions) {
   try {
     console.log(`Fetching detailed content for ${owner}/${repo}...`);
+    const repoKey = `${owner}/${repo}`;
     
-    // For each user's commits, fetch the actual code changes
-    for (const username in contributions.users) {
-      const user = contributions.users[username];
-      
-      if (!user.codeContent) {
-        user.codeContent = {
-          commitDetails: [],
-          prDetails: [],
-          issueDetails: []
-        };
-      }
-      
-      // Fetch detailed commit information (with diffs)
-      for (const repoKey in user.repositories) {
-        if (!repoKey.startsWith(`${owner}/${repo}`)) continue;
+    // Get the users who have contributed to this repo
+    const contributors = contributions.repositories[repoKey]?.contributors || [];
+    
+    // Process contributors in parallel with a concurrency limit
+    const concurrencyLimit = 3; // Process 3 users at a time
+    const contributorChunks = chunkArray(contributors, concurrencyLimit);
+    
+    for (const contributorChunk of contributorChunks) {
+      await Promise.all(contributorChunk.map(async (username) => {
+        const user = contributions.users[username];
+        if (!user) return; // Skip if user not found
         
+        if (!user.codeContent) {
+          user.codeContent = {
+            commitDetails: [],
+            prDetails: [],
+            issueDetails: []
+          };
+        }
+        
+        // Check if this user has contributions in this repo
         const repoStats = user.repositories[repoKey];
-        if (repoStats.commits > 0) {
-          // Get this user's commits for this repo
-          try {
-            const commits = await fetchCommitsForRepo({ owner, name: repo }, new Date(contributions.summary.period.startDate), new Date(contributions.summary.period.endDate));
-            
-            // For each commit, get the detailed changes (diffs)
-            for (const commit of commits.slice(0, 5)) { // Limit to 5 commits for performance
-              try {
-                const commitData = await octokit.repos.getCommit({
-                  owner,
-                  repo,
-                  ref: commit.sha
-                });
-                
-                // Extract relevant information
-                const files = commitData.data.files || [];
-                const fileChanges = files.map(file => ({
-                  filename: file.filename,
-                  status: file.status,
-                  additions: file.additions,
-                  deletions: file.deletions,
-                  changes: file.changes,
-                  patch: file.patch && file.patch.length > 500 
-                    ? file.patch.substring(0, 500) + '...' // Truncate large diffs
-                    : file.patch
-                }));
-                
-                user.codeContent.commitDetails.push({
-                  sha: commit.sha,
-                  message: commit.commit.message,
-                  date: commit.commit.author.date,
-                  fileChanges: fileChanges
-                });
-              } catch (error) {
-                console.error(`Error fetching commit details for ${commit.sha}:`, error.message);
-              }
-            }
-          } catch (error) {
-            console.error(`Error fetching commits by author ${username}:`, error.message);
-          }
-        }
+        if (!repoStats) return; // Skip if no repo stats
         
-        // Fetch PR details
-        if (repoStats.pullRequests > 0) {
-          try {
-            const userPRs = await getPullRequestsByUser(owner, repo, username);
+        // Fetch detailed user content in parallel
+        await Promise.all([
+          // Fetch commit details if user has commits in this repo
+          (async () => {
+            if (repoStats.commits <= 0) return;
             
-            for (const pr of userPRs.slice(0, 3)) { // Limit to 3 PRs for performance
-              try {
-                // Get PR details including the files changed
-                const prFiles = await octokit.pulls.listFiles({
-                  owner,
-                  repo,
-                  pull_number: pr.number
-                });
-                
-                // Get PR reviews
-                const reviews = await octokit.pulls.listReviews({
-                  owner,
-                  repo,
-                  pull_number: pr.number
-                });
-                
-                // Extract relevant information
-                const fileChanges = prFiles.data.map(file => ({
-                  filename: file.filename,
-                  status: file.status,
-                  additions: file.additions,
-                  deletions: file.deletions,
-                  changes: file.changes
-                }));
-                
-                const reviewSummary = reviews.data.map(review => ({
-                  reviewer: review.user.login,
-                  state: review.state,
-                  body: review.body && review.body.length > 200 
-                    ? review.body.substring(0, 200) + '...' 
-                    : review.body
-                }));
-                
-                user.codeContent.prDetails.push({
-                  number: pr.number,
-                  title: pr.title,
-                  state: pr.state,
-                  created_at: pr.created_at,
-                  fileCount: fileChanges.length,
-                  totalChanges: fileChanges.reduce((sum, file) => sum + file.changes, 0),
-                  fileChanges: fileChanges.slice(0, 5), // Limit to first 5 files
-                  reviews: reviewSummary
-                });
-              } catch (error) {
-                console.error(`Error fetching PR details for #${pr.number}:`, error.message);
-              }
-            }
-          } catch (error) {
-            console.error(`Error fetching PRs by user ${username}:`, error.message);
-          }
-        }
-        
-        // Fetch issue details
-        if (repoStats.issues > 0) {
-          try {
-            const userIssues = await getIssuesByUser(owner, repo, username);
-            
-            for (const issue of userIssues.slice(0, 3)) { // Limit to 3 issues for performance
-              if (issue.pull_request) continue; // Skip PRs that are also counted as issues
+            try {
+              // Get this user's commits for this repo
+              const commits = await fetchCommitsForRepo(
+                { owner, name: repo }, 
+                new Date(contributions.summary.period.startDate), 
+                new Date(contributions.summary.period.endDate)
+              );
               
-              try {
-                // Get issue comments
-                const comments = await octokit.issues.listComments({
-                  owner,
-                  repo,
-                  issue_number: issue.number
+              // Filter commits by author
+              const userCommits = commits.filter(commit => 
+                (commit.author?.login === username) || 
+                (commit.commit?.author?.name === username)
+              ).slice(0, 5); // Limit to 5 commits for performance
+              
+              // Fetch commit details in parallel (with concurrency limit)
+              const commitChunks = chunkArray(userCommits, 3);
+              
+              for (const commitChunk of commitChunks) {
+                const commitDetailPromises = commitChunk.map(async (commit) => {
+                  try {
+                    const commitData = await octokit.repos.getCommit({
+                      owner,
+                      repo,
+                      ref: commit.sha
+                    });
+                    
+                    // Extract relevant information
+                    const files = commitData.data.files || [];
+                    const fileChanges = files.map(file => ({
+                      filename: file.filename,
+                      status: file.status,
+                      additions: file.additions,
+                      deletions: file.deletions,
+                      changes: file.changes,
+                      patch: file.patch && file.patch.length > 500 
+                        ? file.patch.substring(0, 500) + '...' // Truncate large diffs
+                        : file.patch
+                    }));
+                    
+                    return {
+                      sha: commit.sha,
+                      message: commit.commit.message,
+                      date: commit.commit.author.date,
+                      fileChanges: fileChanges
+                    };
+                  } catch (error) {
+                    console.error(`Error fetching commit details for ${commit.sha}:`, error.message);
+                    return null;
+                  }
                 });
                 
-                const commentSummary = comments.data.map(comment => ({
-                  user: comment.user.login,
-                  body: comment.body && comment.body.length > 200 
-                    ? comment.body.substring(0, 200) + '...' 
-                    : comment.body
-                }));
-                
-                user.codeContent.issueDetails.push({
-                  number: issue.number,
-                  title: issue.title,
-                  state: issue.state,
-                  created_at: issue.created_at,
-                  body: issue.body && issue.body.length > 300 
-                    ? issue.body.substring(0, 300) + '...' 
-                    : issue.body,
-                  comments: commentSummary
-                });
-              } catch (error) {
-                console.error(`Error fetching issue details for #${issue.number}:`, error.message);
+                const commitDetails = await Promise.all(commitDetailPromises);
+                // Filter out null results and add to user's commit details
+                commitDetails
+                  .filter(detail => detail !== null)
+                  .forEach(detail => user.codeContent.commitDetails.push(detail));
               }
+            } catch (error) {
+              console.error(`Error fetching commits by author ${username}:`, error.message);
             }
-          } catch (error) {
-            console.error(`Error fetching issues by user ${username}:`, error.message);
-          }
-        }
-      }
+          })(),
+          
+          // Fetch PR details if user has PRs in this repo
+          (async () => {
+            if (repoStats.pullRequests <= 0) return;
+            
+            try {
+              const userPRs = await getPullRequestsByUser(owner, repo, username);
+              
+              // Fetch PR details in parallel (with concurrency limit)
+              const prChunks = chunkArray(userPRs.slice(0, 3), 2); // Limit to 3 PRs
+              
+              for (const prChunk of prChunks) {
+                const prDetailPromises = prChunk.map(async (pr) => {
+                  try {
+                    // Fetch PR files and reviews in parallel
+                    const [prFilesResponse, reviewsResponse] = await Promise.all([
+                      octokit.pulls.listFiles({
+                        owner,
+                        repo,
+                        pull_number: pr.number
+                      }),
+                      octokit.pulls.listReviews({
+                        owner,
+                        repo,
+                        pull_number: pr.number
+                      })
+                    ]);
+                    
+                    // Extract relevant information
+                    const fileChanges = prFilesResponse.data.map(file => ({
+                      filename: file.filename,
+                      status: file.status,
+                      additions: file.additions,
+                      deletions: file.deletions,
+                      changes: file.changes
+                    }));
+                    
+                    const reviewSummary = reviewsResponse.data.map(review => ({
+                      reviewer: review.user.login,
+                      state: review.state,
+                      body: review.body && review.body.length > 200 
+                        ? review.body.substring(0, 200) + '...' 
+                        : review.body
+                    }));
+                    
+                    return {
+                      number: pr.number,
+                      title: pr.title,
+                      state: pr.state,
+                      created_at: pr.created_at,
+                      fileCount: fileChanges.length,
+                      totalChanges: fileChanges.reduce((sum, file) => sum + file.changes, 0),
+                      fileChanges: fileChanges.slice(0, 5), // Limit to first 5 files
+                      reviews: reviewSummary
+                    };
+                  } catch (error) {
+                    console.error(`Error fetching PR details for #${pr.number}:`, error.message);
+                    return null;
+                  }
+                });
+                
+                const prDetails = await Promise.all(prDetailPromises);
+                // Filter out null results and add to user's PR details
+                prDetails
+                  .filter(detail => detail !== null)
+                  .forEach(detail => user.codeContent.prDetails.push(detail));
+              }
+            } catch (error) {
+              console.error(`Error fetching PRs by user ${username}:`, error.message);
+            }
+          })(),
+          
+          // Fetch issue details if user has issues in this repo
+          (async () => {
+            if (repoStats.issues <= 0) return;
+            
+            try {
+              const userIssues = await getIssuesByUser(owner, repo, username);
+              
+              // Filter out PRs that are also counted as issues
+              const filteredIssues = userIssues
+                .filter(issue => !issue.pull_request)
+                .slice(0, 3); // Limit to 3 issues
+              
+              // Fetch issue details in parallel
+              const issueDetailPromises = filteredIssues.map(async (issue) => {
+                try {
+                  // Get issue comments
+                  const comments = await octokit.issues.listComments({
+                    owner,
+                    repo,
+                    issue_number: issue.number
+                  });
+                  
+                  const commentSummary = comments.data.map(comment => ({
+                    user: comment.user.login,
+                    body: comment.body && comment.body.length > 200 
+                      ? comment.body.substring(0, 200) + '...' 
+                      : comment.body
+                  }));
+                  
+                  return {
+                    number: issue.number,
+                    title: issue.title,
+                    state: issue.state,
+                    created_at: issue.created_at,
+                    body: issue.body && issue.body.length > 300 
+                      ? issue.body.substring(0, 300) + '...' 
+                      : issue.body,
+                    comments: commentSummary
+                  };
+                } catch (error) {
+                  console.error(`Error fetching issue details for #${issue.number}:`, error.message);
+                  return null;
+                }
+              });
+              
+              const issueDetails = await Promise.all(issueDetailPromises);
+              // Filter out null results and add to user's issue details
+              issueDetails
+                .filter(detail => detail !== null)
+                .forEach(detail => user.codeContent.issueDetails.push(detail));
+            } catch (error) {
+              console.error(`Error fetching issues by user ${username}:`, error.message);
+            }
+          })()
+        ]);
+      }));
     }
     
     return true;
@@ -695,8 +757,6 @@ async function fetchDetailedContent(owner, repo, contributions) {
 async function fetchCommitsForRepo(repo, since, until) {
   try {
     let allCommits = [];
-    let page = 1;
-    let hasMoreCommits = true;
     const maxRetries = 3;
     
     console.log(`Fetching commits for ${repo.owner}/${repo.name} from ${since.toISOString()} to ${until.toISOString()}`);
@@ -719,69 +779,25 @@ async function fetchCommitsForRepo(repo, since, until) {
       allBranches = [''];  // Empty string will use default branch
     }
 
-    // For each branch, fetch commits
-    for (const branch of allBranches) {
-      page = 1;
-      hasMoreCommits = true;
+    // Process branches in parallel with concurrency limit to avoid rate limiting
+    const concurrencyLimit = 3; // Process 3 branches at a time
+    const branchChunks = chunkArray(allBranches, concurrencyLimit);
+    
+    for (const branchChunk of branchChunks) {
+      // Process each chunk of branches in parallel
+      const branchCommitsResults = await Promise.all(
+        branchChunk.map(branch => fetchCommitsForBranch(repo, branch, since, until, maxRetries))
+      );
       
-      console.log(`Fetching commits for branch: ${branch || 'default'} in ${repo.owner}/${repo.name}`);
-      
-      while (hasMoreCommits) {
-        let retries = 0;
-        let success = false;
+      // Combine and deduplicate commits
+      for (const branchCommits of branchCommitsResults) {
+        // Filter to avoid duplicate commits that might appear in multiple branches
+        const newCommits = branchCommits.filter(
+          commit => !allCommits.some(existingCommit => existingCommit.sha === commit.sha)
+        );
         
-        while (!success && retries < maxRetries) {
-          try {
-            console.log(`Fetching page ${page} of commits for ${repo.owner}/${repo.name} branch ${branch || 'default'}`);
-            
-            const response = await octokit.rest.repos.listCommits({
-              owner: repo.owner,
-              repo: repo.name,
-              sha: branch, // Specify the branch - if empty string, uses default branch
-              since: since.toISOString(),
-              until: until.toISOString(),
-              per_page: 100,
-              page: page,
-            });
-
-            console.log(`Received ${response.data.length} commits for ${repo.owner}/${repo.name} branch ${branch || 'default'} (page ${page})`);
-            
-            if (response.data.length === 0) {
-              hasMoreCommits = false;
-            } else {
-              // Filter to avoid duplicate commits that might appear in multiple branches
-              const newCommits = response.data.filter(
-                commit => !allCommits.some(existingCommit => existingCommit.sha === commit.sha)
-              );
-              
-              console.log(`Found ${newCommits.length} new unique commits (filtered out ${response.data.length - newCommits.length} duplicates)`);
-              
-              allCommits = [...allCommits, ...newCommits];
-              page++;
-            }
-            success = true;
-          } catch (error) {
-            retries++;
-            console.log(`Error fetching commits for ${repo.owner}/${repo.name} branch ${branch || 'default'} (page ${page}, attempt ${retries}): ${error.message}`);
-            
-            if (error.status === 403 && error.response?.headers?.['x-ratelimit-remaining'] === '0') {
-              // Handle rate limiting
-              const resetTime = error.response.headers['x-ratelimit-reset'];
-              const waitTime = Math.max(resetTime * 1000 - Date.now(), 0) + 1000; // Add 1 second buffer
-              console.log(`Rate limited. Waiting for ${waitTime/1000} seconds before retrying...`);
-              await new Promise(resolve => setTimeout(resolve, waitTime));
-            } else if (retries < maxRetries) {
-              // Exponential backoff for other errors
-              const waitTime = Math.pow(2, retries) * 1000;
-              console.log(`Retrying in ${waitTime/1000} seconds...`);
-              await new Promise(resolve => setTimeout(resolve, waitTime));
-            } else {
-              console.error(`Failed to fetch commits for ${repo.owner}/${repo.name} branch ${branch || 'default'} (page ${page}) after ${maxRetries} attempts`);
-              // Continue to the next branch if we have issues with this one
-              hasMoreCommits = false;
-            }
-          }
-        }
+        console.log(`Found ${newCommits.length} new unique commits (filtered out ${branchCommits.length - newCommits.length} duplicates)`);
+        allCommits = [...allCommits, ...newCommits];
       }
     }
 
@@ -791,6 +807,70 @@ async function fetchCommitsForRepo(repo, since, until) {
     console.error(`Error fetching commits for ${repo.owner}/${repo.name}:`, error);
     return []; // Return empty array on error
   }
+}
+
+/**
+ * Helper function to fetch commits for a single branch with pagination and retry logic
+ */
+async function fetchCommitsForBranch(repo, branch, since, until, maxRetries) {
+  let allBranchCommits = [];
+  let page = 1;
+  let hasMoreCommits = true;
+  
+  console.log(`Fetching commits for branch: ${branch || 'default'} in ${repo.owner}/${repo.name}`);
+  
+  while (hasMoreCommits) {
+    let retries = 0;
+    let success = false;
+    
+    while (!success && retries < maxRetries) {
+      try {
+        console.log(`Fetching page ${page} of commits for ${repo.owner}/${repo.name} branch ${branch || 'default'}`);
+        
+        const response = await octokit.rest.repos.listCommits({
+          owner: repo.owner,
+          repo: repo.name,
+          sha: branch, // Specify the branch - if empty string, uses default branch
+          since: since.toISOString(),
+          until: until.toISOString(),
+          per_page: 100,
+          page: page,
+        });
+
+        console.log(`Received ${response.data.length} commits for ${repo.owner}/${repo.name} branch ${branch || 'default'} (page ${page})`);
+        
+        if (response.data.length === 0) {
+          hasMoreCommits = false;
+        } else {
+          allBranchCommits = [...allBranchCommits, ...response.data];
+          page++;
+        }
+        success = true;
+      } catch (error) {
+        retries++;
+        console.log(`Error fetching commits for ${repo.owner}/${repo.name} branch ${branch || 'default'} (page ${page}, attempt ${retries}): ${error.message}`);
+        
+        if (error.status === 403 && error.response?.headers?.['x-ratelimit-remaining'] === '0') {
+          // Handle rate limiting
+          const resetTime = error.response.headers['x-ratelimit-reset'];
+          const waitTime = Math.max(resetTime * 1000 - Date.now(), 0) + 1000; // Add 1 second buffer
+          console.log(`Rate limited. Waiting for ${waitTime/1000} seconds before retrying...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        } else if (retries < maxRetries) {
+          // Exponential backoff for other errors
+          const waitTime = Math.pow(2, retries) * 1000;
+          console.log(`Retrying in ${waitTime/1000} seconds...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        } else {
+          console.error(`Failed to fetch commits for ${repo.owner}/${repo.name} branch ${branch || 'default'} (page ${page}) after ${maxRetries} attempts`);
+          // Continue to the next branch if we have issues with this one
+          hasMoreCommits = false;
+        }
+      }
+    }
+  }
+  
+  return allBranchCommits;
 }
 
 /**
@@ -1136,139 +1216,162 @@ async function generateContributionReport() {
     repositories: {}
   };
   
-  // Process each repository
-  for (const { owner, repo } of REPOS) {
-    const repoKey = `${owner}/${repo}`;
-    contributions.repositories[repoKey] = {
-      commits: 0,
-      pullRequests: 0,
-      issues: 0,
-      prsMerged: 0,
-      issuesClosed: 0,
-      linesAdded: 0,
-      linesDeleted: 0,
-      linesModified: 0,
-      contributors: []
-    };
-    
-    // Get commit activity from ALL branches (don't filter by branch)
-    const commits = await fetchCommitsForRepo({ owner, name: repo }, new Date(since), new Date(until));
-    contributions.summary.totalCommits += commits.length;
-    contributions.repositories[repoKey].commits = commits.length;
-    
-    // Process commits by user
-    for (const commit of commits) {
-      const author = commit.author?.login || commit.commit?.author?.name || 'Unknown';
-      if (!contributions.users[author]) {
-        initializeUserStats(contributions.users, author);
+  console.log(`Starting parallel processing of ${REPOS.length} repositories...`);
+  
+  // Process repositories in parallel with a concurrency limit
+  const concurrencyLimit = 3; // Adjust based on your API rate limits
+  const repoChunks = chunkArray(REPOS, concurrencyLimit);
+  
+  for (const repoChunk of repoChunks) {
+    // Process each chunk of repositories in parallel
+    await Promise.all(repoChunk.map(async ({ owner, repo }) => {
+      console.log(`Processing repository: ${owner}/${repo}`);
+      const repoKey = `${owner}/${repo}`;
+      
+      // Initialize repository data
+      contributions.repositories[repoKey] = {
+        commits: 0,
+        pullRequests: 0,
+        issues: 0,
+        prsMerged: 0,
+        issuesClosed: 0,
+        linesAdded: 0,
+        linesDeleted: 0,
+        linesModified: 0,
+        contributors: []
+      };
+      
+      // Fetch commits from all branches
+      const commits = await fetchCommitsForRepo({ owner, name: repo }, new Date(since), new Date(until));
+      contributions.summary.totalCommits += commits.length;
+      contributions.repositories[repoKey].commits = commits.length;
+      
+      // Process commits by user (with concurrency limit)
+      const commitChunks = chunkArray(commits, 5); // Process 5 commits at a time
+      
+      for (const commitChunk of commitChunks) {
+        await Promise.all(commitChunk.map(async (commit) => {
+          const author = commit.author?.login || commit.commit?.author?.name || 'Unknown';
+          
+          // Initialize user stats if not already done
+          if (!contributions.users[author]) {
+            initializeUserStats(contributions.users, author);
+          }
+          
+          contributions.users[author].totalCommits++;
+          contributions.users[author].repositories[repoKey].commits++;
+          
+          // Add contributor to repo's list if not already there
+          if (!contributions.repositories[repoKey].contributors.includes(author)) {
+            contributions.repositories[repoKey].contributors.push(author);
+          }
+          
+          // Get detailed commit info to calculate lines of code changes
+          try {
+            const commitData = await octokit.repos.getCommit({
+              owner,
+              repo,
+              ref: commit.sha
+            });
+            
+            // Extract stats for lines added/deleted
+            const files = commitData.data.files || [];
+            let commitLinesAdded = 0;
+            let commitLinesDeleted = 0;
+            
+            for (const file of files) {
+              commitLinesAdded += file.additions || 0;
+              commitLinesDeleted += file.deletions || 0;
+            }
+            
+            // Update user stats
+            contributions.users[author].linesAdded += commitLinesAdded;
+            contributions.users[author].linesDeleted += commitLinesDeleted;
+            contributions.users[author].linesModified += (commitLinesAdded + commitLinesDeleted);
+            
+            // Update repo user stats
+            contributions.users[author].repositories[repoKey].linesAdded += commitLinesAdded;
+            contributions.users[author].repositories[repoKey].linesDeleted += commitLinesDeleted;
+            contributions.users[author].repositories[repoKey].linesModified += (commitLinesAdded + commitLinesDeleted);
+            
+            // Update repo and summary total stats
+            contributions.repositories[repoKey].linesAdded += commitLinesAdded;
+            contributions.repositories[repoKey].linesDeleted += commitLinesDeleted;
+            contributions.repositories[repoKey].linesModified += (commitLinesAdded + commitLinesDeleted);
+            contributions.summary.totalLinesAdded += commitLinesAdded;
+            contributions.summary.totalLinesDeleted += commitLinesDeleted;
+            contributions.summary.totalLinesModified += (commitLinesAdded + commitLinesDeleted);
+          } catch (error) {
+            console.error(`Error fetching commit details for ${commit.sha}:`, error.message);
+          }
+        }));
       }
       
-      contributions.users[author].totalCommits++;
-      contributions.users[author].repositories[repoKey].commits++;
+      // Fetch PRs and issues in parallel
+      const [prs, issues] = await Promise.all([
+        getPullRequests(owner, repo, since, until),
+        getIssues(owner, repo, since, until)
+      ]);
       
-      // Add contributor to repo's list if not already there
-      if (!contributions.repositories[repoKey].contributors.includes(author)) {
-        contributions.repositories[repoKey].contributors.push(author);
-      }
+      // Process PRs
+      contributions.summary.totalPRs += prs.length;
+      contributions.repositories[repoKey].pullRequests = prs.length;
       
-      // Get detailed commit info to calculate lines of code changes
-      try {
-        const commitData = await octokit.repos.getCommit({
-          owner,
-          repo,
-          ref: commit.sha
-        });
-        
-        // Extract stats for lines added/deleted
-        const files = commitData.data.files || [];
-        let commitLinesAdded = 0;
-        let commitLinesDeleted = 0;
-        
-        for (const file of files) {
-          commitLinesAdded += file.additions || 0;
-          commitLinesDeleted += file.deletions || 0;
+      // Count merged PRs
+      const mergedPRs = prs.filter(pr => pr.merged_at !== null);
+      contributions.summary.prsMerged += mergedPRs.length;
+      contributions.repositories[repoKey].prsMerged = mergedPRs.length;
+      
+      // Process PRs by user
+      for (const pr of prs) {
+        const author = pr.user.login;
+        if (!contributions.users[author]) {
+          initializeUserStats(contributions.users, author);
         }
         
-        // Update user stats
-        contributions.users[author].linesAdded += commitLinesAdded;
-        contributions.users[author].linesDeleted += commitLinesDeleted;
-        contributions.users[author].linesModified += (commitLinesAdded + commitLinesDeleted);
+        contributions.users[author].totalPRs++;
+        contributions.users[author].repositories[repoKey].pullRequests++;
         
-        // Update repo user stats
-        contributions.users[author].repositories[repoKey].linesAdded += commitLinesAdded;
-        contributions.users[author].repositories[repoKey].linesDeleted += commitLinesDeleted;
-        contributions.users[author].repositories[repoKey].linesModified += (commitLinesAdded + commitLinesDeleted);
+        // Add contributor to repo's list if not already there
+        if (!contributions.repositories[repoKey].contributors.includes(author)) {
+          contributions.repositories[repoKey].contributors.push(author);
+        }
+      }
+      
+      // Process issues
+      contributions.summary.totalIssues += issues.length;
+      contributions.repositories[repoKey].issues = issues.length;
+      
+      // Count closed issues
+      const closedIssues = issues.filter(issue => issue.state === 'closed' && !issue.pull_request);
+      contributions.summary.issuesClosed += closedIssues.length;
+      contributions.repositories[repoKey].issuesClosed = closedIssues.length;
+      
+      // Process issues by user
+      for (const issue of issues) {
+        // Skip pull requests that are also counted as issues
+        if (issue.pull_request) continue;
         
-        // Update repo and summary total stats
-        contributions.repositories[repoKey].linesAdded += commitLinesAdded;
-        contributions.repositories[repoKey].linesDeleted += commitLinesDeleted;
-        contributions.repositories[repoKey].linesModified += (commitLinesAdded + commitLinesDeleted);
-        contributions.summary.totalLinesAdded += commitLinesAdded;
-        contributions.summary.totalLinesDeleted += commitLinesDeleted;
-        contributions.summary.totalLinesModified += (commitLinesAdded + commitLinesDeleted);
-      } catch (error) {
-        console.error(`Error fetching commit details for ${commit.sha}:`, error.message);
+        const author = issue.user.login;
+        if (!contributions.users[author]) {
+          initializeUserStats(contributions.users, author);
+        }
+        
+        contributions.users[author].totalIssues++;
+        contributions.users[author].repositories[repoKey].issues++;
+        
+        // Add contributor to repo's list if not already there
+        if (!contributions.repositories[repoKey].contributors.includes(author)) {
+          contributions.repositories[repoKey].contributors.push(author);
+        }
       }
-    }
-    
-    // Get pull requests
-    const prs = await getPullRequests(owner, repo, since, until);
-    contributions.summary.totalPRs += prs.length;
-    contributions.repositories[repoKey].pullRequests = prs.length;
-    
-    // Count merged PRs
-    const mergedPRs = prs.filter(pr => pr.merged_at !== null);
-    contributions.summary.prsMerged += mergedPRs.length;
-    contributions.repositories[repoKey].prsMerged = mergedPRs.length;
-    
-    // Process PRs by user
-    for (const pr of prs) {
-      const author = pr.user.login;
-      if (!contributions.users[author]) {
-        initializeUserStats(contributions.users, author);
-      }
-      
-      contributions.users[author].totalPRs++;
-      contributions.users[author].repositories[repoKey].pullRequests++;
-      
-      // Add contributor to repo's list if not already there
-      if (!contributions.repositories[repoKey].contributors.includes(author)) {
-        contributions.repositories[repoKey].contributors.push(author);
-      }
-    }
-    
-    // Get issues
-    const issues = await getIssues(owner, repo, since, until);
-    contributions.summary.totalIssues += issues.length;
-    contributions.repositories[repoKey].issues = issues.length;
-    
-    // Count closed issues
-    const closedIssues = issues.filter(issue => issue.state === 'closed' && !issue.pull_request);
-    contributions.summary.issuesClosed += closedIssues.length;
-    contributions.repositories[repoKey].issuesClosed = closedIssues.length;
-    
-    // Process issues by user
-    for (const issue of issues) {
-      // Skip pull requests that are also counted as issues
-      if (issue.pull_request) continue;
-      
-      const author = issue.user.login;
-      if (!contributions.users[author]) {
-        initializeUserStats(contributions.users, author);
-      }
-      
-      contributions.users[author].totalIssues++;
-      contributions.users[author].repositories[repoKey].issues++;
-      
-      // Add contributor to repo's list if not already there
-      if (!contributions.repositories[repoKey].contributors.includes(author)) {
-        contributions.repositories[repoKey].contributors.push(author);
-      }
-    }
-    
-    // Fetch detailed content for commits, PRs, and issues
-    await fetchDetailedContent(owner, repo, contributions);
+    }));
   }
+  
+  // Fetch detailed content for commits, PRs, and issues in parallel
+  await Promise.all(REPOS.map(async ({ owner, repo }) => {
+    await fetchDetailedContent(owner, repo, contributions);
+  }));
   
   // Calculate activity scores and assign grades
   for (const username in contributions.users) {
@@ -1304,6 +1407,15 @@ async function generateContributionReport() {
   }
   
   return contributions;
+}
+
+// Helper function to split an array into chunks for parallel processing
+function chunkArray(array, chunkSize) {
+  const chunks = [];
+  for (let i = 0; i < array.length; i += chunkSize) {
+    chunks.push(array.slice(i, i + chunkSize));
+  }
+  return chunks;
 }
 
 // Helper function to convert numeric score to letter grade
