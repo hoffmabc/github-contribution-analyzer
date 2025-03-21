@@ -544,7 +544,7 @@ async function fetchDetailedContent(owner, repo, contributions) {
         if (repoStats.commits > 0) {
           // Get this user's commits for this repo
           try {
-            const commits = await getCommitsByAuthor(owner, repo, username);
+            const commits = await fetchCommitsForRepo({ owner, name: repo }, new Date(contributions.summary.period.startDate), new Date(contributions.summary.period.endDate));
             
             // For each commit, get the detailed changes (diffs)
             for (const commit of commits.slice(0, 5)) { // Limit to 5 commits for performance
@@ -688,6 +688,78 @@ async function fetchDetailedContent(owner, repo, contributions) {
   } catch (error) {
     console.error(`Error in fetchDetailedContent for ${owner}/${repo}:`, error);
     return false;
+  }
+}
+
+// Improved function to fetch commits with retry logic
+async function fetchCommitsForRepo(repo, since, until) {
+  try {
+    let allCommits = [];
+    let page = 1;
+    let hasMoreCommits = true;
+    const maxRetries = 3;
+    
+    console.log(`Fetching commits for ${repo.owner}/${repo.name} from ${since.toISOString()} to ${until.toISOString()}`);
+
+    while (hasMoreCommits) {
+      let retries = 0;
+      let success = false;
+      
+      while (!success && retries < maxRetries) {
+        try {
+          console.log(`Fetching page ${page} of commits for ${repo.owner}/${repo.name}`);
+          
+          const response = await octokit.rest.repos.listCommits({
+            owner: repo.owner,
+            repo: repo.name,
+            since: since.toISOString(),
+            until: until.toISOString(),
+            per_page: 100,
+            page: page,
+          });
+
+          console.log(`Received ${response.data.length} commits for ${repo.owner}/${repo.name} (page ${page})`);
+          
+          if (response.data.length === 0) {
+            hasMoreCommits = false;
+          } else {
+            allCommits = [...allCommits, ...response.data];
+            page++;
+          }
+          success = true;
+        } catch (error) {
+          retries++;
+          console.log(`Error fetching commits for ${repo.owner}/${repo.name} (page ${page}, attempt ${retries}): ${error.message}`);
+          
+          if (error.status === 403 && error.response?.headers?.['x-ratelimit-remaining'] === '0') {
+            // Handle rate limiting
+            const resetTime = error.response.headers['x-ratelimit-reset'];
+            const waitTime = Math.max(resetTime * 1000 - Date.now(), 0) + 1000; // Add 1 second buffer
+            console.log(`Rate limited. Waiting for ${waitTime/1000} seconds before retrying...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+          } else if (retries < maxRetries) {
+            // Exponential backoff for other errors
+            const waitTime = Math.pow(2, retries) * 1000;
+            console.log(`Retrying in ${waitTime/1000} seconds...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+          } else {
+            console.error(`Failed to fetch commits for ${repo.owner}/${repo.name} (page ${page}) after ${maxRetries} attempts`);
+            // If we've already got some commits, continue with what we have
+            if (allCommits.length > 0) {
+              hasMoreCommits = false;
+            } else {
+              throw error; // Re-throw if we haven't got any commits
+            }
+          }
+        }
+      }
+    }
+
+    console.log(`Total commits fetched for ${repo.owner}/${repo.name}: ${allCommits.length}`);
+    return allCommits;
+  } catch (error) {
+    console.error(`Error fetching commits for ${repo.owner}/${repo.name}:`, error);
+    return []; // Return empty array on error
   }
 }
 
@@ -1014,7 +1086,7 @@ async function generateContributionReport() {
     };
     
     // Get commit activity
-    const commits = await getCommits(owner, repo, since, until);
+    const commits = await fetchCommitsForRepo({ owner, name: repo }, new Date(since), new Date(until));
     contributions.summary.totalCommits += commits.length;
     contributions.repositories[repoKey].commits = commits.length;
     
@@ -1338,52 +1410,52 @@ async function sendWeeklyReport() {
 /**
  * Get commits from GitHub API
  */
-async function getCommits(owner, repo, since, until) {
+async function getCommits(repos, since, until) {
+  console.log(`Fetching commits for ${repos.length} repositories...`);
+  
   try {
-    // GitHub API paginates results, so we need to collect all pages
-    let allCommits = [];
-    let page = 1;
-    let hasMorePages = true;
-    
-    while (hasMorePages) {
-      try {
-        const response = await octokit.repos.listCommits({
-          owner,
-          repo,
-          since,
-          until,
-          per_page: 100,
-          page
+    const repoCommits = await Promise.all(
+      repos.map(async (repo) => {
+        const commits = await fetchCommitsForRepo(repo, since, until);
+        return { repo, commits };
+      })
+    );
+
+    // Process all commits from all repos
+    const allCommits = [];
+    const userCommitMap = {};
+
+    repoCommits.forEach(({ repo, commits }) => {
+      commits.forEach(commit => {
+        if (!commit.author) return; // Skip commits without author info
+        
+        const username = commit.author.login;
+        if (!username) return; // Skip if no login available
+        
+        // Add commit to the user's list
+        if (!userCommitMap[username]) {
+          userCommitMap[username] = [];
+        }
+        userCommitMap[username].push({
+          ...commit,
+          repo: {
+            owner: repo.owner,
+            name: repo.name
+          }
         });
         
-        if (response.data.length === 0) {
-          hasMorePages = false;
-        } else {
-          allCommits = allCommits.concat(response.data);
-          page++;
-        }
-      } catch (apiError) {
-        // Handle specific GitHub API errors
-        if (apiError.status === 403 && apiError.message.includes('rate limit')) {
-          console.error(`Rate limit exceeded when fetching commits for ${owner}/${repo}`);
-          hasMorePages = false;
-        } else if (apiError.status === 404) {
-          console.error(`Repository ${owner}/${repo} not found or no access`);
-          hasMorePages = false;
-        } else if (apiError.status === 401) {
-          console.error(`Authentication error when fetching commits for ${owner}/${repo}. Check GitHub token.`);
-          hasMorePages = false;
-        } else {
-          console.error(`Error fetching commits for ${owner}/${repo} (page ${page}):`, apiError);
-          hasMorePages = false;
-        }
-      }
-    }
+        // Also add to the overall list
+        allCommits.push(commit);
+      });
+    });
+
+    console.log(`Total commits across all repos: ${allCommits.length}`);
+    console.log(`Unique users with commits: ${Object.keys(userCommitMap).length}`);
     
-    return allCommits;
+    return { allCommits, userCommitMap };
   } catch (error) {
-    console.error(`Error in getCommits for ${owner}/${repo}:`, error);
-    return [];
+    console.error('Error fetching commits:', error);
+    return { allCommits: [], userCommitMap: {} };
   }
 }
 
@@ -1454,59 +1526,100 @@ async function getPullRequests(owner, repo, since, until) {
  */
 async function getIssues(owner, repo, since, until) {
   try {
+    console.log(`[ISSUES] Fetching issues for ${owner}/${repo} from ${since} to ${until}`);
     let allIssues = [];
     let page = 1;
     let hasMorePages = true;
+    const maxAttempts = 3;
     
     while (hasMorePages) {
-      try {
-        const response = await octokit.issues.listForRepo({
-          owner,
-          repo,
-          state: 'all',
-          since, // Since parameter works for issues
-          per_page: 100,
-          page
-        });
-        
-        if (response.data.length === 0) {
-          hasMorePages = false;
-        } else {
-          // We still need to filter by the until date
-          const filteredIssues = response.data.filter(issue => {
-            const createdDate = new Date(issue.created_at);
-            return createdDate <= new Date(until);
+      let attempts = 0;
+      let success = false;
+      
+      while (!success && attempts < maxAttempts) {
+        try {
+          attempts++;
+          // Format dates properly to avoid encoding issues
+          const sinceDate = new Date(since);
+          const sinceIsoString = sinceDate.toISOString();
+          
+          console.log(`[ISSUES] Fetching page ${page} of issues for ${owner}/${repo} (attempt ${attempts})`);
+          
+          // Use the new advanced_search parameter
+          const response = await octokit.issues.listForRepo({
+            owner,
+            repo,
+            state: 'all',
+            since: sinceIsoString,
+            per_page: 100,
+            page,
+            request: {
+              timeout: 30000 // 30 second timeout
+            }
           });
           
-          allIssues = allIssues.concat(filteredIssues);
-          page++;
+          if (response.data.length === 0) {
+            hasMorePages = false;
+          } else {
+            // Filter by the until date
+            const untilDate = new Date(until);
+            const filteredIssues = response.data.filter(issue => {
+              const createdDate = new Date(issue.created_at);
+              return createdDate <= untilDate;
+            });
+            
+            allIssues = allIssues.concat(filteredIssues);
+            page++;
+            
+            // If we received less than per_page, we can stop
+            if (response.data.length < 100) {
+              hasMorePages = false;
+            }
+          }
           
-          // If we received less than per_page, we can stop
-          if (response.data.length < 100) {
+          success = true;
+          
+        } catch (apiError) {
+          console.error(`[ERROR] Error fetching issues for ${owner}/${repo} (page ${page}, attempt ${attempts}):`, apiError.message);
+          
+          // Specific handling for socket hang up errors
+          if (apiError.message.includes('socket hang up') || apiError.message.includes('ECONNRESET')) {
+            const waitTime = Math.pow(2, attempts) * 1000; // Exponential backoff
+            console.log(`[RETRY] Socket error, waiting ${waitTime/1000}s before retry...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            continue;
+          }
+          
+          if (apiError.status === 403 && apiError.message.includes('rate limit')) {
+            const resetTime = apiError.response?.headers?.['x-ratelimit-reset'];
+            if (resetTime) {
+              const waitTime = Math.max((resetTime * 1000) - Date.now(), 0) + 1000;
+              console.log(`[RATE LIMIT] Rate limit exceeded. Waiting ${waitTime/1000}s before retry...`);
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+              // Don't increment attempts for rate limit errors
+              attempts--;
+              continue;
+            }
+          }
+          
+          // For other errors, apply exponential backoff
+          if (attempts < maxAttempts) {
+            const waitTime = Math.pow(2, attempts) * 1000;
+            console.log(`[RETRY] Waiting ${waitTime/1000}s before retry...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+          } else {
+            // If we've failed maxAttempts times, give up on this page
+            console.error(`[FAILED] Could not fetch page ${page} of issues after ${maxAttempts} attempts`);
             hasMorePages = false;
           }
-        }
-      } catch (apiError) {
-        // Handle specific GitHub API errors
-        if (apiError.status === 403 && apiError.message.includes('rate limit')) {
-          console.error(`Rate limit exceeded when fetching issues for ${owner}/${repo}`);
-          hasMorePages = false;
-        } else if (apiError.status === 404) {
-          console.error(`Repository ${owner}/${repo} not found or no access`);
-          hasMorePages = false;
-        } else if (apiError.status === 401) {
-          console.error(`Authentication error when fetching issues for ${owner}/${repo}. Check GitHub token.`);
-          hasMorePages = false;
-        } else {
-          console.error(`Error fetching issues for ${owner}/${repo} (page ${page}):`, apiError);
-          hasMorePages = false;
         }
       }
     }
     
+    console.log(`[SUCCESS] Found ${allIssues.length} issues for ${owner}/${repo}`);
     return allIssues;
   } catch (error) {
-    console.error(`Error in getIssues for ${owner}/${repo}:`, error);
+    console.error(`[ERROR] Error in getIssues for ${owner}/${repo}:`, error);
     return [];
   }
 }
@@ -1586,6 +1699,60 @@ async function handleTokenInfo({ respond }) {
       text: `Error checking GitHub token: ${error.message}`,
       response_type: 'ephemeral'
     });
+  }
+}
+
+// Update PR search to use the non-deprecated API
+async function fetchPullRequestsForUser(repo, username, since) {
+  try {
+    console.log(`Fetching PRs for ${username} in ${repo.owner}/${repo.name}`);
+    
+    // Use the pulls API instead of search
+    const pullRequests = await octokit.paginate(octokit.rest.pulls.list, {
+      owner: repo.owner,
+      repo: repo.name,
+      state: 'all',
+      per_page: 100
+    });
+    
+    // Filter by author and date
+    const sinceDate = new Date(since);
+    const filteredPRs = pullRequests.filter(pr => {
+      const prCreatedAt = new Date(pr.created_at);
+      return pr.user.login.toLowerCase() === username.toLowerCase() && prCreatedAt >= sinceDate;
+    });
+    
+    console.log(`Found ${filteredPRs.length} PRs for ${username} in ${repo.owner}/${repo.name}`);
+    return filteredPRs;
+  } catch (error) {
+    console.error(`Error fetching PRs for ${username} in ${repo.owner}/${repo.name}:`, error);
+    return [];
+  }
+}
+
+// Update issue search to use the non-deprecated API
+async function fetchIssuesForUser(repo, username, since) {
+  try {
+    console.log(`Fetching issues for ${username} in ${repo.owner}/${repo.name}`);
+    
+    // Use the issues API instead of search
+    const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
+      owner: repo.owner,
+      repo: repo.name,
+      state: 'all',
+      creator: username,
+      since: since.toISOString(),
+      per_page: 100
+    });
+    
+    // Filter out pull requests (they're also returned by the issues API)
+    const filteredIssues = issues.filter(issue => !issue.pull_request);
+    
+    console.log(`Found ${filteredIssues.length} issues for ${username} in ${repo.owner}/${repo.name}`);
+    return filteredIssues;
+  } catch (error) {
+    console.error(`Error fetching issues for ${username} in ${repo.owner}/${repo.name}:`, error);
+    return [];
   }
 }
 
