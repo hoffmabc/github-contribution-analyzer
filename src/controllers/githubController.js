@@ -1448,6 +1448,16 @@ F: Failing/Unacceptable`;
 async function generateContributionReport() {
   console.time('totalReportGeneration'); // Performance measurement
   
+  // CLOUD RUN FIX: Clear the cache before generating a new report to prevent memory buildup
+  console.log('Clearing cache before generating new report');
+  apiCache.clear();
+  
+  // Force garbage collection if available (Node.js with --expose-gc flag)
+  if (global.gc) {
+    console.log('Running garbage collection');
+    global.gc();
+  }
+  
   // Get contributions from the last 7 days
   const endDate = new Date();
   const startDate = new Date();

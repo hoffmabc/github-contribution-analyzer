@@ -8,8 +8,8 @@ const interactivityController = require('./controllers/interactivityController')
 // Load environment variables
 dotenv.config();
 
-// Get port from environment
-const PORT = parseInt(process.env.PORT || '3000', 10);
+// Get port from environment - Cloud Run uses PORT=8080
+const PORT = parseInt(process.env.PORT || '8080', 10);
 
 // Print environment details for debugging (without exposing sensitive values)
 console.log('=== APPLICATION STARTUP ===');

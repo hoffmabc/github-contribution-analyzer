@@ -15,5 +15,5 @@ ENV NODE_ENV=production
 # Make sure the app listens on the port provided by Cloud Run
 ENV PORT=8080
 
-# Explicitly set the entrypoint and command
-CMD ["node", "src/index.js"]
+# Explicitly set the entrypoint and command with garbage collection enabled
+CMD ["node", "--expose-gc", "src/index.js"]
