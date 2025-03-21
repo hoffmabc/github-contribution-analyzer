@@ -1074,13 +1074,13 @@ async function fetchCommitsForRepo(repo, since, until) {
         return 0;
       });
     
-      // Take only top 3 branches (after sorting) - this is a major performance optimization
-      console.log(`Optimizing: Analyzing only top 3 branches out of ${allBranches.length}`);
-      allBranches = allBranches.slice(0, 3);
+      // Process all branches but keep them in prioritized order
+      console.log(`Processing all ${allBranches.length} branches in priority order`);
     }
 
     // Process branches in parallel with concurrency limit to avoid rate limiting
-    const concurrencyLimit = 3; // Process 3 branches at a time
+    // Increase concurrency for better performance since we're checking all branches
+    const concurrencyLimit = 5; // Process 5 branches at a time
     const branchChunks = chunkArray(allBranches, concurrencyLimit);
   
     for (const branchChunk of branchChunks) {
@@ -1137,8 +1137,36 @@ async function fetchCommitsForBranch(repo, branch, since, until, maxRetries) {
   const isMemoryOptimized = process.env.MEMORY_OPTIMIZED === 'true';
   const pageSize = isMemoryOptimized ? 100 : 250;
   
-  // In memory-optimized mode, limit to fewer pages
-  const maxPages = isMemoryOptimized ? 2 : 10;
+  // Get a reasonable max pages limit that balances completeness with performance
+  // We prioritize memory optimization if set, otherwise use environment variable or default
+  const maxPages = isMemoryOptimized ? 2 : 
+                   process.env.MAX_BRANCH_PAGES ? parseInt(process.env.MAX_BRANCH_PAGES) : 10;
+
+  // First, check if branch has any commits in the time period (fast check with 1 result)
+  try {
+    const checkResponse = await octokit.rest.repos.listCommits({
+      owner: repo.owner,
+      repo: repo.name,
+      sha: branch,
+      since: since.toISOString(),
+      until: until.toISOString(),
+      per_page: 1
+    });
+    
+    // If no commits in this time period, skip this branch entirely
+    if (checkResponse.data.length === 0) {
+      console.log(`Branch ${branch || 'default'} in ${repo.owner}/${repo.name} has no commits in specified time period, skipping`);
+      apiCache.set('commits', cacheKey, []); // Cache empty result
+      return [];
+    }
+    
+    console.log(`Branch ${branch || 'default'} in ${repo.owner}/${repo.name} has commits in time period, fetching all`);
+  } catch (error) {
+    // If we get an error checking the branch, it might not exist anymore or we don't have access
+    console.error(`Error checking commits for branch ${branch || 'default'} in ${repo.owner}/${repo.name}:`, error.message);
+    apiCache.set('commits', cacheKey, []); // Cache empty result to avoid retrying
+    return [];
+  }
 
   while (hasMoreCommits && page <= maxPages) {
     let retries = 0;
@@ -2581,5 +2609,9 @@ module.exports = {
   generateUserContributionReport,
   sendWeeklyReport,
   saveReport,
-  postReportToChannel
+  postReportToChannel,
+  handleGenerateReport,
+  handleUserReport,
+  handleLastWeekReport,
+  handleTokenInfo
 };
